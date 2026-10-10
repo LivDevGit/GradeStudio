@@ -45,7 +45,7 @@ Match head vs. the classic-transfer teacher it imitates: **35.86 dB** (v4; v3: 3
 | Environment | WSL2 + PyTorch 2.7 (cu128) on an RTX 5070, Python 3.12 | done |
 | Core ML | Export to ML Program (iOS 17, fp16), only standard MIL ops (conv, instance_norm, linear, exp, reduce_mean, ...); ~19 MB | done (Mac parity check pending) |
 | Data | Unsplash Lite (25k photos, commercial-OK for training) + 8 synthetic creative directions; FiveK for stage 1 | done |
-| Stage 1 | Adaptive auto-enhance on FiveK (validation of the technique) | needs a rerun after the init fix |
+| Stage 1 | Adaptive auto-enhance on FiveK (validation of the technique): 23.67 dB test PSNR vs 17.80 no-op (was 20.9 with the broken encoder; the paper reports 25.2 on its own FiveK variant) | done |
 | Stage 2 | Reference-conditioned LUT prediction: look + match heads (v4) | done (first version) |
 | Demo | Gradio UI: 3 side-by-side options, presets or custom reference, .cube export | done (local) |
 | On-device | Core ML model + Metal LUT application in Grade Studio | todo |
