@@ -30,11 +30,12 @@ Held-out Unsplash photos, 1000 synthetic look pairs, reference from a *different
 | v1: 24 LUTs, channel histograms | 26.06 dB | 9.31 | |
 | v2: 64 LUTs, + 8³ joint RGB histogram | 26.75 dB | 8.58 | same-scene reference: 29.56 dB (v1: 26.89) |
 | v3: v2 + match head (warm start, 20 epochs) | 26.41 dB | – | look head gives up 0.3 dB to the shared trunk |
-| **v4: v3 + fixed CNN encoder** (warm start) | **26.59 dB** | – | current model |
+| v4: v3 + fixed CNN encoder (warm start) | 26.59 dB | – | |
+| **v5: v4 architecture trained from scratch** (40 epochs) | **26.91 dB** | – | current model |
 
-v1–v3 were trained with a CNN encoder whose output was constant (see *Lessons learned*); all their adaptivity came from the color-statistics branch. v4 is the first with a working encoder, warm-started from v3, so a from-scratch run should do better.
+v1–v3 were trained with a CNN encoder whose output was constant (see *Lessons learned*); all their adaptivity came from the color-statistics branch. v4 fixed the encoder on top of v3; v5 trains the fixed architecture from scratch and is best on both heads.
 
-Match head vs. the classic-transfer teacher it imitates: **35.86 dB** (v4; v3: 34.97) with natural photos as references, 35.74 dB with graded ones (no-op: 16.9 dB). The look head alone stays far from the teacher (17.4 dB), so the two heads really do different things and the "match" slider spans a meaningful range.
+Match head vs. the classic-transfer teacher it imitates: **36.27 dB** (v5; v4: 35.86, v3: 34.97) with natural photos as references, 36.09 dB with graded ones (no-op: 16.9 dB). The look head alone stays far from the teacher (17.3 dB), so the two heads really do different things and the "match" slider spans a meaningful range.
 
 `scripts/match_sheet.py` renders visual reports (`exports/match_synthetic.jpg`, `exports/match_real.jpg`).
 
@@ -46,7 +47,7 @@ Match head vs. the classic-transfer teacher it imitates: **35.86 dB** (v4; v3: 3
 | Core ML | Export to ML Program (iOS 17, fp16), only standard MIL ops (conv, instance_norm, linear, exp, reduce_mean, ...); ~19 MB | done (Mac parity check pending) |
 | Data | Unsplash Lite (25k photos, commercial-OK for training) + 8 synthetic creative directions; FiveK for stage 1 | done |
 | Stage 1 | Adaptive auto-enhance on FiveK (validation of the technique): 23.67 dB test PSNR vs 17.80 no-op (was 20.9 with the broken encoder; the paper reports 25.2 on its own FiveK variant) | done |
-| Stage 2 | Reference-conditioned LUT prediction: look + match heads (v4) | done (first version) |
+| Stage 2 | Reference-conditioned LUT prediction: look + match heads (v5) | done (first version) |
 | Demo | Gradio UI: 3 side-by-side options, presets or custom reference, .cube export | done (local) |
 | On-device | Core ML model + Metal LUT application in Grade Studio | todo |
 
@@ -76,9 +77,9 @@ bash scripts/setup_wsl.sh                # venv (Python 3.12), PyTorch cu128, de
 source ~/.venvs/grademl/bin/activate
 python scripts/download_unsplash.py      # 25k photos -> $GRADEML_DATA/unsplash/images
 python scripts/resize_images.py unsplash/images unsplash/images_384 --size 384
-python scripts/train_match.py --config configs/match_v4.yaml
-python scripts/app.py --ckpt runs/match_v4/best.pt    # http://localhost:7860
-python scripts/export_coreml.py --model match --ckpt runs/match_v4/best.pt
+python scripts/train_match.py --config configs/match_v5.yaml
+python scripts/app.py --ckpt runs/match_v5/best.pt    # http://localhost:7860
+python scripts/export_coreml.py --model match --ckpt runs/match_v5/best.pt
 ```
 
 Datasets live at `$GRADEML_DATA` (default `~/grademl-data`, on the WSL filesystem for I/O speed).
