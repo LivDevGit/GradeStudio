@@ -42,6 +42,30 @@ def apply_lut(img: torch.Tensor, lut: torch.Tensor) -> torch.Tensor:
     return out.squeeze(2)  # (B, 3, 1, H, W) -> (B, 3, H, W)
 
 
+def lut_smoothness(lut: torch.Tensor) -> torch.Tensor:
+    """Total-variation regularizer (Zeng et al.): mean squared difference
+    between neighboring LUT entries along each input axis. lut: (..., 3, D, D, D)."""
+    return sum(d.pow(2).mean() for d in _axis_diffs(lut))
+
+
+def lut_monotonicity(lut: torch.Tensor, own_channel_only: bool = False) -> torch.Tensor:
+    """Penalize outputs that decrease as an input channel increases (Zeng et al.).
+    Keeps the mapping order-preserving, which avoids banding and color inversions.
+
+    own_channel_only: only require R_out to rise with R_in (G with G, B with B).
+    Creative grades legitimately break cross-channel monotonicity (more
+    saturation lowers R_out as G_in rises), so stage 2 uses this variant.
+    """
+    diffs = _axis_diffs(lut)
+    if own_channel_only:  # diffs are along r, g, b -> pick channel c of diff c
+        return sum(F.relu(-d[..., c, :, :, :]).mean() for c, d in enumerate(diffs))
+    return sum(F.relu(-d).mean() for d in diffs)
+
+
+def _axis_diffs(lut: torch.Tensor) -> list[torch.Tensor]:
+    return [lut.diff(dim=-1), lut.diff(dim=-2), lut.diff(dim=-3)]  # along r, g, b
+
+
 def read_cube(path: str | Path) -> torch.Tensor:
     """Read an Adobe/Resolve .cube 3D LUT into (3, D, D, D)."""
     size, rows = None, []

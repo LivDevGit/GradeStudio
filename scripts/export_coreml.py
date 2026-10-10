@@ -24,17 +24,19 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def build(kind: str, ckpt: str | None) -> torch.nn.Module:
-    model = AdaptiveLUTNet() if kind == "adaptive" else MatchLUTNet()
+    cls = AdaptiveLUTNet if kind == "adaptive" else MatchLUTNet
     if ckpt:
-        model.load_state_dict(torch.load(ckpt, map_location="cpu")["model"])
+        state = torch.load(ckpt, map_location="cpu")
+        model = cls(**state["cfg"]["model"])
+        model.load_state_dict(state["model"])
     else:
-        # Untrained nets output a constant identity LUT, which would make the
-        # parity check meaningless. Randomize the head and basis so the
+        # Untrained nets output a constant identity LUT (zero bases), which
+        # would make the parity check meaningless. Randomize the bases so the
         # output actually depends on the inputs.
+        model = cls()
         torch.manual_seed(0)
         with torch.no_grad():
-            torch.nn.init.normal_(model.head.weight, std=0.5)
-            model.luts.basis[1:].normal_(std=0.05)
+            model.luts.basis.normal_(std=0.05)
     return model.eval()
 
 

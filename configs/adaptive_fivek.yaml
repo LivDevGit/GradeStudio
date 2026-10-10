@@ -1,0 +1,21 @@
+# Stage 1: image-adaptive 3D LUT on FiveK (input -> Expert C).
+# Defaults follow Zeng et al. 2020 except batch size (they used 1).
+name: adaptive_fivek
+seed: 0
+
+model:
+  n_luts: 3
+  lut_size: 33
+
+data:
+  target: expertC
+  batch_size: 16
+  workers: 8
+
+train:
+  epochs: 200
+  lr: 3.0e-4              # higher than the paper (1e-4 @ batch 1): batch 16, ~30x fewer steps
+  weight_decay: 0.0
+  lambda_smooth: 1.0e-4   # LUT total variation
+  lambda_mono: 10.0       # LUT monotonicity
+  eval_every: 5           # epochs

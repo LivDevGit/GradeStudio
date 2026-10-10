@@ -1,0 +1,25 @@
+# Stage 2: reference-based look transfer on Unsplash Lite + synthetic looks.
+name: match_unsplash
+seed: 0
+
+model:
+  n_luts: 24
+  lut_size: 33
+
+data:
+  images: unsplash/images_384   # relative to $GRADEML_DATA; made by scripts/resize_images.py
+  val_every_nth: 50         # every 50th photo is held out (~500 photos)
+  val_samples: 1000
+  p_generic: 0.35           # share of fully random looks vs named directions
+  batch_size: 32
+  workers: 14
+
+train:
+  epochs: 40                # one epoch = one pass over the train photos
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 500
+  lambda_lut: 1.0           # L1 between predicted and true LUT
+  lambda_smooth: 1.0e-4
+  lambda_mono: 1.0          # own-channel monotonicity only
+  eval_every: 2

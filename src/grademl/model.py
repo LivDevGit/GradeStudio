@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .lut import DEFAULT_SIZE, identity_lut
 
@@ -48,33 +49,34 @@ class Encoder(nn.Module):
 
 
 class LUTBank(nn.Module):
-    """N learnable basis LUTs; output = sum_i w_i * basis_i.
+    """N learnable residual basis LUTs: output = identity + sum_i w_i * basis_i.
 
-    Basis 0 starts as identity and the rest as zero, so a network that
-    predicts w = [1, 0, ..., 0] returns the input image unchanged.
+    The bases start at zero, so any untrained network returns the input
+    image unchanged. The predicted weights must NOT start at zero too: the
+    gradient of basis_i is proportional to w_i and the gradient of w_i to
+    basis_i, so zero-initializing both would freeze them at zero forever
+    (see _head).
     """
 
     def __init__(self, n_luts: int = 3, size: int = DEFAULT_SIZE):
         super().__init__()
-        basis = torch.zeros(n_luts, 3, size, size, size)
-        basis[0] = identity_lut(size)
-        self.basis = nn.Parameter(basis)
+        self.basis = nn.Parameter(torch.zeros(n_luts, 3, size, size, size))
+        self.register_buffer("identity", identity_lut(size).flatten())
 
     def forward(self, weights: torch.Tensor) -> torch.Tensor:
         # (B, N) x (N, 3*D^3) -> (B, 3, D, D, D); matmul instead of einsum for
         # a simpler Core ML graph.
         n, c, d, h, w = self.basis.shape
-        flat = weights @ self.basis.reshape(n, -1)
+        flat = self.identity + weights @ self.basis.reshape(n, -1)
         return flat.reshape(-1, c, d, h, w)
 
 
 def _head(in_dim: int, n_luts: int) -> nn.Linear:
+    # Default (random) weights so every basis LUT receives gradient from the
+    # first step; zero bias. Output is still the identity LUT at init because
+    # the bases are zero.
     head = nn.Linear(in_dim, n_luts)
-    # Start at the identity LUT: w = [1, 0, ...] regardless of features.
-    nn.init.zeros_(head.weight)
-    with torch.no_grad():
-        head.bias.zero_()
-        head.bias[0] = 1.0
+    nn.init.zeros_(head.bias)
     return head
 
 
@@ -93,23 +95,93 @@ class AdaptiveLUTNet(nn.Module):
         return self.luts(weights)
 
 
+class ColorStats(nn.Module):
+    """Explicit global color statistics of an image.
+
+    The CNN encoder uses instance norm, which strips per-channel means, i.e.
+    exactly the color casts that define a look. This branch hands them to
+    the head directly:
+      - soft histograms of R, G, B and luminance (bins x 4)
+      - mean chroma (RGB minus luminance) in luminance bands from shadows to
+        highlights, plus how much of the image falls in each band. This is
+        what captures split toning ("teal shadows, orange highlights").
+      - optionally (bins3d > 0) a soft joint RGB histogram with bins3d^3
+        cells: the full color distribution, so the head can compare which
+        colors the reference has against which the photo has.
+    Only elementwise ops, means and rank <= 4 tensors (Core ML's limit is 5
+    for most ops), so it converts cleanly.
+    """
+
+    def __init__(self, bins: int = 16, bands: int = 5, bins3d: int = 0):
+        super().__init__()
+        self.register_buffer("hist_c", torch.linspace(0, 1, bins).view(1, 1, bins, 1, 1))
+        self.register_buffer("band_c", torch.linspace(0, 1, bands).view(1, bands, 1, 1))
+        self.register_buffer("luma_w", torch.tensor([0.2126, 0.7152, 0.0722]).view(1, 3, 1, 1))
+        self.hist_k = 0.5 * (bins - 1) ** 2   # gaussian width ~ one bin
+        self.band_k = 0.5 * (bands - 1) ** 2
+        self.bins3d = bins3d
+        if bins3d:
+            self.register_buffer("c3d", torch.linspace(0, 1, bins3d).view(1, bins3d, 1))
+            self.k3d = 0.5 * (bins3d - 1) ** 2
+        self.out_dim = 4 * bins + bands * 4 + bins3d**3
+
+    def joint_hist(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, 3, h, w) -> (B, bins3d^3) soft joint RGB histogram, sqrt-scaled."""
+        # Reshape with -1, not h*w: arithmetic on traced shapes becomes an
+        # `int` op that coremltools cannot convert.
+        b, k = x.shape[0], self.bins3d
+        flat = x.reshape(b, 3, 1, -1)
+        a = torch.exp(-self.k3d * (flat - self.c3d.unsqueeze(1)) ** 2)  # (B, 3, k, N) per-axis weights
+        rg = (a[:, 0].unsqueeze(2) * a[:, 1].unsqueeze(1)).reshape(b, k * k, 1, -1)
+        rgb = (rg * a[:, 2].unsqueeze(1)).reshape(b, k**3, -1)           # (B, k^3, N)
+        hist = rgb.mean(2)
+        hist = hist / (hist.sum(1, keepdim=True) + 1e-6)
+        return torch.sqrt(hist * k**3 + 1e-6)  # ~1 for a uniform distribution
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.avg_pool2d(x, 4)  # 256 -> 64: plenty for global statistics
+        luma = (x * self.luma_w).sum(1, keepdim=True)
+        chans = torch.cat([x, luma], 1).unsqueeze(2)                     # (B, 4, 1, h, w)
+        hist = torch.exp(-self.hist_k * (chans - self.hist_c) ** 2).mean((3, 4))
+        hist = hist / (hist.sum(2, keepdim=True) + 1e-6)                 # (B, 4, bins)
+
+        w = torch.exp(-self.band_k * (luma - self.band_c) ** 2)          # (B, bands, h, w)
+        mass = w.mean((2, 3))                                            # (B, bands)
+        chroma = x - luma                                                # (B, 3, h, w)
+        band_chroma = (w.unsqueeze(2) * chroma.unsqueeze(1)).mean((3, 4)) / (mass.unsqueeze(2) + 1e-4)
+        b = x.shape[0]
+        # Chroma is small (~0.05); scale it up so it is not drowned out.
+        feats = [hist.reshape(b, -1), mass, 10 * band_chroma.reshape(b, -1)]
+        if self.bins3d:
+            feats.append(self.joint_hist(F.avg_pool2d(x, 2)))  # 32x32 is enough for the 3D histogram
+        return torch.cat(feats, 1)
+
+
 class MatchLUTNet(nn.Module):
     """Stage 2: (content, reference) -> LUT that gives content the reference's look.
 
-    One shared encoder embeds both images; the head sees both embeddings and
-    their difference, since the LUT has to map one color distribution onto
-    the other.
+    A shared CNN encoder (scene content) and ColorStats (color distribution)
+    embed both images; the head sees both embeddings and their difference,
+    since the LUT has to map one color distribution onto the other.
     """
 
-    def __init__(self, n_luts: int = 8, lut_size: int = DEFAULT_SIZE, width: int = 16):
+    def __init__(self, n_luts: int = 24, lut_size: int = DEFAULT_SIZE, width: int = 16, hidden: int = 512,
+                 bins3d: int = 0):
         super().__init__()
         self.encoder = Encoder(width)
-        d = self.encoder.out_dim
-        self.mlp = nn.Sequential(nn.Linear(3 * d, 256), nn.LeakyReLU(0.2), nn.Dropout(0.3))
-        self.head = _head(256, n_luts)
+        self.stats = ColorStats(bins3d=bins3d)
+        d = self.encoder.out_dim + self.stats.out_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(3 * d, hidden), nn.LeakyReLU(0.2),
+            nn.Linear(hidden, hidden), nn.LeakyReLU(0.2), nn.Dropout(0.1),
+        )
+        self.head = _head(hidden, n_luts)
         self.luts = LUTBank(n_luts, lut_size)
 
+    def embed(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.encoder(x), self.stats(x)], 1)
+
     def forward(self, content: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
-        fc, fr = self.encoder(content), self.encoder(reference)
+        fc, fr = self.embed(content), self.embed(reference)
         weights = self.head(self.mlp(torch.cat([fc, fr, fr - fc], dim=1)))
         return self.luts(weights)
