@@ -166,7 +166,7 @@ class MatchLUTNet(nn.Module):
     """
 
     def __init__(self, n_luts: int = 24, lut_size: int = DEFAULT_SIZE, width: int = 16, hidden: int = 512,
-                 bins3d: int = 0):
+                 bins3d: int = 0, heads: int = 1):
         super().__init__()
         self.encoder = Encoder(width)
         self.stats = ColorStats(bins3d=bins3d)
@@ -176,12 +176,21 @@ class MatchLUTNet(nn.Module):
             nn.Linear(hidden, hidden), nn.LeakyReLU(0.2), nn.Dropout(0.1),
         )
         self.head = _head(hidden, n_luts)
+        # Optional second head sharing trunk and LUT bases:
+        #   head       -> "look": only the grade applied to the reference
+        #   match_head -> "match": also pull the photo's colors toward the
+        #                 reference's (trained on grademl.transfer targets)
+        self.match_head = _head(hidden, n_luts) if heads == 2 else None
         self.luts = LUTBank(n_luts, lut_size)
 
     def embed(self, x: torch.Tensor) -> torch.Tensor:
         return torch.cat([self.encoder(x), self.stats(x)], 1)
 
-    def forward(self, content: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    def forward(self, content: torch.Tensor, reference: torch.Tensor):
+        """Returns the look LUT, or (look LUT, match LUT) with heads=2."""
         fc, fr = self.embed(content), self.embed(reference)
-        weights = self.head(self.mlp(torch.cat([fc, fr, fr - fc], dim=1)))
-        return self.luts(weights)
+        h = self.mlp(torch.cat([fc, fr, fr - fc], dim=1))
+        look = self.luts(self.head(h))
+        if self.match_head is None:
+            return look
+        return look, self.luts(self.match_head(h))

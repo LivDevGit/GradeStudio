@@ -20,6 +20,7 @@ from grademl.lut import apply_lut
 from grademl.metrics import psnr, rgb_to_lab
 from grademl.model import MatchLUTNet
 from grademl.synthetic import DIRECTIONS, list_images, random_look
+from grademl.transfer import transfer_lut
 
 REPO = Path(__file__).resolve().parents[1]
 TILE = (192, 288)
@@ -66,9 +67,13 @@ def main() -> None:
     g = torch.Generator().manual_seed(args.seed)
     pick = lambda: val[int(torch.randint(len(val), (), generator=g))]
 
-    def predict(content: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
-        lut = model(resize(content[None].to(dev)), resize(reference[None].to(dev)))
+    def predict(content: torch.Tensor, reference: torch.Tensor, head: int = 0) -> torch.Tensor:
+        """head 0 = look, 1 = match (two-head models only)."""
+        out = model(resize(content[None].to(dev)), resize(reference[None].to(dev)))
+        lut = out[head] if isinstance(out, tuple) else out
         return apply_lut(content[None].to(dev), lut)[0].cpu()
+
+    two_heads = model.match_head is not None
 
     # Sheet 1: synthetic looks per direction.
     rows, labels, scores = [], [], []
@@ -95,8 +100,14 @@ def main() -> None:
     rows = []
     for r, c in zip(refs, contents):
         reference, content = load_rgb(r), load_rgb(c)
-        rows.append([tile(reference), tile(content), tile(predict(content, reference))])
-    save_sheet(rows, [r.stem[:12] for r in refs], ["reference (real photo)", "your photo", "model"],
+        classic = apply_lut(content[None], transfer_lut(content[None], reference[None]))[0]
+        row = [tile(reference), tile(content), tile(predict(content, reference))]
+        if two_heads:
+            row.append(tile(predict(content, reference, head=1)))
+        rows.append(row + [tile(classic)])
+    header = ["reference (real photo)", "your photo", "model: look"]
+    header += ["model: match"] if two_heads else []
+    save_sheet(rows, [r.stem[:12] for r in refs], header + ["classic transfer (teacher)"],
                out / "match_real.jpg")
     print(f"synthetic mean psnr {sum(scores) / len(scores):.2f} dB")
 

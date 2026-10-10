@@ -57,7 +57,11 @@ def main() -> None:
     examples = tuple(torch.from_numpy(im).permute(2, 0, 1)[None].float() / 255 for im in images)
     with torch.no_grad():
         traced = torch.jit.trace(model, examples)
-        expected = model(*examples).numpy()
+        out = model(*examples)
+    # Two-head match models return (look, match).
+    outs = out if isinstance(out, tuple) else (out,)
+    out_names = ["lut_look", "lut_match"] if len(outs) == 2 else ["lut"]
+    expected = {f"expected_{n}": o.numpy() for n, o in zip(out_names, outs)}
 
     # ImageType: the app passes a 256x256 CVPixelBuffer directly; Core ML
     # scales 0..255 -> 0..1 to match training.
@@ -69,13 +73,15 @@ def main() -> None:
     mlmodel = ct.convert(
         traced,
         inputs=inputs,
-        outputs=[ct.TensorType(name="lut")],
+        outputs=[ct.TensorType(name=n) for n in out_names],
         convert_to="mlprogram",
         minimum_deployment_target=ct.target.iOS17,
         compute_precision=ct.precision.FLOAT32 if args.fp32 else ct.precision.FLOAT16,
     )
     mlmodel.short_description = (
-        "Predicts a 3D LUT (1,3,D,D,D), layout lut[c,b,g,r], from 256x256 RGB input(s)."
+        "Predicts 3D LUT(s) (1,3,D,D,D), layout lut[c,b,g,r], from 256x256 RGB input(s). "
+        "lut_look: the reference's grade only; lut_match: also matches its colors. "
+        "Blend lut_look -> lut_match for a 'match strength' slider."
     )
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -83,8 +89,7 @@ def main() -> None:
     path = args.out / f"{stem}.mlpackage"
     mlmodel.save(str(path))
 
-    np.savez_compressed(args.out / f"{stem}.testvec.npz", expected_lut=expected,
-                        **dict(zip(names, images)))
+    np.savez_compressed(args.out / f"{stem}.testvec.npz", **expected, **dict(zip(names, images)))
 
     ops = sorted({op.op_type for f in mlmodel._mil_program.functions.values() for op in f.operations})
     n_params = sum(p.numel() for p in model.parameters())

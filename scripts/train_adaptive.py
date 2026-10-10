@@ -88,10 +88,14 @@ def main() -> None:
         t0, running = time.time(), 0.0
         for inp, tgt in train_loader:
             inp, tgt = inp.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
-            out = apply_lut(inp, model(inp))
+            lut = model(inp)
+            out = apply_lut(inp, lut)
             mse = F.mse_loss(out, tgt)
-            basis = model.luts.basis
-            loss = mse + tc["lambda_smooth"] * lut_smoothness(basis) + tc["lambda_mono"] * lut_monotonicity(basis)
+            # Smoothness on the residual bases; monotonicity on the predicted
+            # LUT (identity + residuals): a residual basis may legitimately
+            # decrease, only the final mapping must not.
+            loss = (mse + tc["lambda_smooth"] * lut_smoothness(model.luts.basis)
+                    + tc["lambda_mono"] * lut_monotonicity(lut))
 
             opt.zero_grad(set_to_none=True)
             loss.backward()

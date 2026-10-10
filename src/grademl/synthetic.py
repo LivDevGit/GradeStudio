@@ -335,17 +335,21 @@ class SyntheticMatchPairs(Dataset):
     p_same: probability that the reference is another random crop of the
     *same* photo (train only). Easier pairs that teach the model to compare
     colors directly; the rest use a different scene.
+    p_identity: probability of no look at all, i.e. the reference is an
+    ordinary photo. Teaches the look head that natural photos carry no
+    grade, and gives the match head natural references to learn from.
     """
 
     def __init__(self, images: list[Path], train: bool = True, length: int | None = None,
                  strength: float = 1.0, render_size: int = 17, seed: int = 0,
-                 p_generic: float = 0.35, p_same: float = 0.0):
+                 p_generic: float = 0.35, p_same: float = 0.0, p_identity: float = 0.0):
         if len(images) < 2:
             raise ValueError("need at least 2 base images")
         self.images, self.train = images, train
         self.length = length or len(images)
         self.strength, self.render_size, self.seed, self.p_generic = strength, render_size, seed, p_generic
         self.p_same = p_same if train else 0.0
+        self.p_identity = p_identity
 
     def __len__(self) -> int:
         return self.length
@@ -370,7 +374,10 @@ class SyntheticMatchPairs(Dataset):
         else:
             b = (a + rng.randrange(1, n)) % n  # a different scene for the reference
         g = torch.Generator().manual_seed(rng.getrandbits(63))
-        lut = render_look(sample_look(g, strength=self.strength, p_generic=self.p_generic), self.render_size)
+        if self.p_identity and rng.random() < self.p_identity:
+            lut = identity_lut(self.render_size)
+        else:
+            lut = render_look(sample_look(g, strength=self.strength, p_generic=self.p_generic), self.render_size)
         return self._load(self.images[a], rng), self._load(self.images[b], rng), lut
 
 
