@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Data, weights, exports (too large / licensed — never commit)
+data/*
+!data/.gitkeep
+exports/*
+!exports/.gitkeep
+runs/
+checkpoints/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.mlpackage/
+*.mlmodel
+*.cube
+
+# Gradio
+.gradio/
+flagged/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

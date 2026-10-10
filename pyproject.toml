@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grademl"
+version = "0.1.0"
+description = "Reference-based color grading: predict a 3D LUT that transfers a reference look"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]

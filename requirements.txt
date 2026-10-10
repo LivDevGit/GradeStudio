@@ -1,0 +1,12 @@
+# PyTorch is installed separately (CUDA build for the RTX 5070 / Blackwell needs cu128+):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+numpy
+pillow
+opencv-python-headless
+tqdm
+pyyaml
+tensorboard
+gradio
+coremltools
+huggingface_hub
+pytest
