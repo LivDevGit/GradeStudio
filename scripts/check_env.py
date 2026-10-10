@@ -19,5 +19,9 @@ print(f"matmul ok   {y:.1f}")
 try:
     import coremltools as ct
     print(f"coremltools {ct.__version__}")
-except ImportError:
-    print("coremltools not installed")
+    # Native lib needed to write .mlpackage weights; missing when pip built
+    # coremltools from the sdist (no wheel for this Python version).
+    from coremltools import libmilstoragepython  # noqa: F401
+    print("coreml io    ok")
+except ImportError as e:
+    raise SystemExit(f"coremltools unusable: {e}")

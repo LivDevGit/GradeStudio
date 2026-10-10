@@ -10,8 +10,8 @@ Based on *Learning Image-adaptive 3D Lookup Tables for High Performance Photo En
 
 | Stage | What | Status |
 |---|---|---|
-| Environment | WSL2 + PyTorch CUDA on an RTX 5070 | in progress |
-| Core ML smoke test | Export an untrained LUT net with coremltools, catch unsupported ops early | todo |
+| Environment | WSL2 + PyTorch 2.7 (cu128) on an RTX 5070, Python 3.12 | done |
+| Core ML smoke test | Both nets export to ML Program (iOS 17, fp16); MIL ops: conv, instance_norm, leaky_relu, linear, reduce_mean, reshape | done (Mac parity check pending) |
 | Data | MIT-Adobe FiveK (low-res sRGB) + synthetic pairs from random LUTs/presets | todo |
 | Stage 1 | Adaptive auto-enhance on FiveK to validate the technique | todo |
 | Stage 2 | Reference-conditioned LUT prediction ("match the look") | todo |

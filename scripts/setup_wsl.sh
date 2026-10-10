@@ -4,24 +4,32 @@
 set -euo pipefail
 
 VENV="${VENV:-$HOME/.venvs/grademl}"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-sudo apt-get update
-sudo apt-get install -y python3-venv python3-pip git
-
-python3 -m venv "$VENV"
+# Python 3.12: coremltools only ships native wheels (needed to save
+# .mlpackage weights) up to cp313, and the distro Python may be newer.
+# uv fetches a standalone 3.12 without touching the system Python.
+if ! command -v uv >/dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+uv venv --clear --python 3.12 "$VENV"
 source "$VENV/bin/activate"
-pip install --upgrade pip wheel
 
-# Blackwell (sm_120) needs a CUDA 12.8+ build of PyTorch.
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-pip install -r requirements.txt
-pip install -e .
+# torch 2.7.x: newest release coremltools 9.0 is tested against, and the
+# first with Blackwell (sm_120) kernels in the cu128 build.
+uv pip install "torch==2.7.1" "torchvision==0.22.1" --index-url https://download.pytorch.org/whl/cu128
+uv pip install -r "$REPO/requirements.txt"
+
+# Make src/ importable. `pip install -e .` fails on /mnt/* (DrvFs rejects
+# setuptools' temp files), so register the path with a .pth file instead.
+echo "$REPO/src" > "$(python -c 'import site; print(site.getsitepackages()[0])')/grademl.pth"
 
 # Data lives on the WSL ext4 filesystem: reading thousands of small images
 # through /mnt/f is several times slower.
 mkdir -p "$HOME/grademl-data"
 grep -q GRADEML_DATA "$HOME/.bashrc" || echo "export GRADEML_DATA=\$HOME/grademl-data" >> "$HOME/.bashrc"
 
-python scripts/check_env.py
+python "$REPO/scripts/check_env.py"
 echo
 echo "Done. Activate later with: source $VENV/bin/activate"
