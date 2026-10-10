@@ -48,6 +48,14 @@ v6 (from scratch, 40 epochs): look head 28.16 dB on held-out pro looks (v5 on th
 
 **Design decision:** presets are known recipes, so the app applies their LUTs directly. Routing a preset through the model (preset reference image -> predicted LUT) visibly weakened it: an L1-trained regressor hedges toward milder looks when unsure. The model is used where it is needed, for user-supplied references.
 
+### Surprise me
+
+`grademl.surprise` picks three bold looks for a photo: it profiles the image (sky, greenery, warm surfaces, darkness, colorfulness), scores the 14 directions, samples three from different families (warm / film / stylized / cool / soft / mono) at 1.0-1.3x preset intensity, and rejects variations that blow highlights or crush blacks. Rule-based for now; the interface allows swapping in a model that learns which options users keep.
+
+### App integration
+
+`scripts/export_presets.py` exports the presets as a LUT bank (84 x float16 33^3, 18 MB); `ios/GradeML.swift` has the Core ML runner, LUT blending and CIColorCube application, the preset loader and a Swift port of Surprise me; `docs/ios_integration.md` lists the Mac/iPhone verification steps (`scripts/check_coreml_parity.py`).
+
 `scripts/match_sheet.py` renders visual reports (`exports/match_synthetic.jpg`, `exports/match_real.jpg`).
 
 ## Pipeline
@@ -60,7 +68,7 @@ v6 (from scratch, 40 epochs): look head 28.16 dB on held-out pro looks (v5 on th
 | Stage 1 | Adaptive auto-enhance on FiveK (validation of the technique): 23.67 dB test PSNR vs 17.80 no-op (was 20.9 with the broken encoder; the paper reports 25.2 on its own FiveK variant) | done |
 | Stage 2 | Reference-conditioned LUT prediction: look + match heads (v6, pro looks + palette teacher) | done (second version) |
 | Demo | Gradio UI: 3 side-by-side options, presets or custom reference, .cube export | done (local) |
-| On-device | Core ML model + Metal LUT application in Grade Studio | todo |
+| On-device | Core ML model + CIColorCube LUT application, preset bank, Surprise me (Swift written, untested on device) | in progress |
 
 ## Lessons learned
 

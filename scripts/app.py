@@ -28,6 +28,7 @@ from grademl.data import data_root, load_rgb, resize
 from grademl.lut import apply_lut, identity_lut, write_cube
 from grademl.model import AdaptiveLUTNet, MatchLUTNet
 from grademl.pro_looks import DIRECTIONS, random_pro_look
+from grademl.surprise import surprise
 from grademl.synthetic import list_images
 
 N_OPTIONS = 3
@@ -65,36 +66,36 @@ def preset_canvas() -> torch.Tensor:
 
 def build_match_ui(model, ckpt, device, title):
     ident = identity_lut(model.luts.basis.shape[-1], device=device)
+    size = model.luts.basis.shape[-1]
     canvas = preset_canvas()
-
-    def preset_reference(direction: str, seed: float):
-        if direction == CUSTOM:
-            return gr.update()
-        # Preset references show the recipe at full strength (no random intensity).
-        look = random_pro_look(torch.Generator().manual_seed(int(seed)), direction=direction, strength=(1.0, 1.0))
-        return to_image(apply_lut(canvas[None], look)[0])
-
     two_heads = model.match_head is not None
 
-    size = model.luts.basis.shape[-1]
+    def preset_lut(direction: str, seed: float, boost: float) -> torch.Tensor:
+        return random_pro_look(torch.Generator().manual_seed(int(seed)), size=size,
+                               direction=direction, strength=(float(boost), float(boost)))
+
+    def preset_reference(direction: str, seed: float, boost: float = 1.0):
+        if direction == CUSTOM:
+            return gr.update()
+        return to_image(apply_lut(canvas[None], preset_lut(direction, seed, boost))[0])
 
     @torch.no_grad()
     def generate(photo, strength, *per_option):
         if photo is None:
             raise gr.Error("Upload a photo first")
         n = N_OPTIONS
-        refs, matches, directions, seeds = (per_option[i * n:(i + 1) * n] for i in range(4))
+        refs, matches, directions, seeds, boosts = (per_option[i * n:(i + 1) * n] for i in range(5))
         x = to_tensor(photo).to(device)[None]
         net_photo = resize(x)
         gallery, cubes = [], []
         tmp = Path(tempfile.mkdtemp())
-        for k, (ref, m, d, sd) in enumerate(zip(refs, matches, directions, seeds)):
+        for k, (ref, m, d, sd, b) in enumerate(zip(refs, matches, directions, seeds, boosts)):
             if d != CUSTOM:
                 # A preset is a known recipe: apply its LUT directly. Asking
                 # the model to re-infer it from a reference image only loses
                 # strength (regression to the mean).
-                lut = random_pro_look(torch.Generator().manual_seed(int(sd)), size=size,
-                                      direction=d, strength=(1.0, 1.0)).to(device)
+                lut = preset_lut(d, sd, b).to(device)
+                label = f"Option {k + 1}: {d}"
             elif ref is None:
                 continue
             else:
@@ -103,52 +104,70 @@ def build_match_ui(model, ckpt, device, title):
                     lut = pred[0][0] + m * (pred[1][0] - pred[0][0])
                 else:
                     lut = pred[0]
+                label = f"Option {k + 1}: your reference"
             lut = ident + strength * (lut - ident)
-            gallery.append((to_image(apply_lut(x, lut)[0]), f"Option {k + 1}"))
+            gallery.append((to_image(apply_lut(x, lut)[0]), label))
             cube = tmp / f"option_{k + 1}.cube"
             write_cube(lut, cube, title=f"grademl option {k + 1}")
             cubes.append(str(cube))
         return [(photo[..., :3], "Original")] + gallery, cubes
 
+    def do_surprise(photo, counter):
+        """Fill the options with bold looks picked for this photo."""
+        if photo is None:
+            raise gr.Error("Upload a photo first")
+        picks = surprise(to_tensor(photo), n=N_OPTIONS, seed=int(counter))
+        dirs = [p.direction for p in picks]
+        seeds_ = [p.seed for p in picks]
+        boosts_ = [round(p.strength, 3) for p in picks]
+        refs_ = [preset_reference(d, s, b) for d, s, b in zip(dirs, seeds_, boosts_)]
+        return [*dirs, *seeds_, *boosts_, *refs_, counter + 1]
+
     with gr.Blocks(title=title) as demo:
-        gr.Markdown(f"## {title}\nModel `{ckpt.get('cfg', {}).get('name')}` epoch {ckpt.get('epoch')}, "
-                    f"val PSNR {ckpt.get('psnr', float('nan')):.2f} dB. Each option takes its look from the "
-                    "reference above it. Presets (🎲 for another variation) apply a pro-style recipe "
-                    "directly; for an uploaded reference the model predicts the LUT. *Match* = 0 copies only "
-                    "the reference's grade (graded film stills); 1 also maps your photo's palette onto the "
-                    "reference's (any photo you like).")
+        gr.Markdown(f"## {title}\nModel `{ckpt.get('cfg', {}).get('name')}` epoch {ckpt.get('epoch')}. "
+                    "Each option takes its look from the reference above it. Presets (🎲 for another "
+                    "variation) apply a pro-style recipe directly; for an uploaded reference the model "
+                    "predicts the LUT. *Match* = 0 copies only the reference's grade (graded film stills); "
+                    "1 also maps your photo's palette onto the reference's (any photo you like). "
+                    "**✨ Surprise me** picks three bold, different looks suited to your photo.")
         with gr.Row():
             photo = gr.Image(label="Your photo", type="numpy", height=320)
-        refs, matches, directions, seeds = [], [], [], []
+        refs, matches, directions, seeds, boosts = [], [], [], [], []
         with gr.Row():
             for k in range(N_OPTIONS):
                 with gr.Column():
                     direction = gr.Dropdown([CUSTOM, *DIRECTIONS], value=DEFAULT_DIRECTIONS[k],
                                             label=f"Option {k + 1}: look source")
                     seed = gr.Number(value=k, precision=0, visible=False)
+                    boost = gr.Number(value=1.0, visible=False)
                     ref = gr.Image(label="Reference", type="numpy", height=200,
                                    value=preset_reference(DEFAULT_DIRECTIONS[k], k))
                     dice = gr.Button("🎲 another variation", size="sm")
                     match = gr.Slider(0, 1, value=0.0, step=0.05, label="Match: grade only -> colors too",
                                       visible=two_heads)
-                    direction.change(preset_reference, [direction, seed], ref)
-                    direction.change(lambda d: 1.0 if d == CUSTOM else 0.0, direction, match)
-                    dice.click(lambda s: s + 100, seed, seed).then(preset_reference, [direction, seed], ref)
+                    direction.input(preset_reference, [direction, seed, boost], ref)
+                    direction.input(lambda d: 1.0 if d == CUSTOM else 0.0, direction, match)
+                    dice.click(lambda s: s + 100, seed, seed).then(preset_reference, [direction, seed, boost], ref)
                     ref.upload(lambda: CUSTOM, None, direction)
                     refs.append(ref)
                     matches.append(match)
                     directions.append(direction)
                     seeds.append(seed)
+                    boosts.append(boost)
         with gr.Row():
             strength = gr.Slider(0, 1.5, value=1.0, step=0.05, label="Intensity")
+            surprise_btn = gr.Button("✨ Surprise me")
             btn = gr.Button("Grade my photo", variant="primary")
+        counter = gr.Number(value=0, precision=0, visible=False)
         gallery = gr.Gallery(label="Results", columns=N_OPTIONS + 1, height=420, object_fit="contain")
         cubes = gr.Files(label="LUTs (.cube) for each option")
-        inputs = [photo, strength, *refs, *matches, *directions, *seeds]
+        inputs = [photo, strength, *refs, *matches, *directions, *seeds, *boosts]
         btn.click(generate, inputs, [gallery, cubes])
         strength.release(generate, inputs, [gallery, cubes])
         for m in matches:
             m.release(generate, inputs, [gallery, cubes])
+        surprise_btn.click(do_surprise, [photo, counter], [*directions, *seeds, *boosts, *refs, counter]) \
+            .then(generate, inputs, [gallery, cubes])
     return demo
 
 
