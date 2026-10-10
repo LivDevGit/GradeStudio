@@ -30,8 +30,11 @@ Held-out Unsplash photos, 1000 synthetic look pairs, reference from a *different
 | v1: 24 LUTs, channel histograms | 26.06 dB | 9.31 | |
 | v2: 64 LUTs, + 8³ joint RGB histogram | 26.75 dB | 8.58 | same-scene reference: 29.56 dB (v1: 26.89) |
 | v3: v2 + match head (warm start, 20 epochs) | 26.41 dB | – | look head gives up 0.3 dB to the shared trunk |
+| **v4: v3 + fixed CNN encoder** (warm start) | **26.59 dB** | – | current model |
 
-Match head (v3) vs. the classic-transfer teacher it imitates: **34.97 dB** with natural photos as references, 34.84 dB with graded ones (no-op: 16.9 dB). The look head alone stays far from the teacher (17.5 dB), so the two heads really do different things and the "match" slider spans a meaningful range.
+v1–v3 were trained with a CNN encoder whose output was constant (see *Lessons learned*); all their adaptivity came from the color-statistics branch. v4 is the first with a working encoder, warm-started from v3, so a from-scratch run should do better.
+
+Match head vs. the classic-transfer teacher it imitates: **35.86 dB** (v4; v3: 34.97) with natural photos as references, 35.74 dB with graded ones (no-op: 16.9 dB). The look head alone stays far from the teacher (17.4 dB), so the two heads really do different things and the "match" slider spans a meaningful range.
 
 `scripts/match_sheet.py` renders visual reports (`exports/match_synthetic.jpg`, `exports/match_real.jpg`).
 
@@ -43,14 +46,15 @@ Match head (v3) vs. the classic-transfer teacher it imitates: **34.97 dB** with 
 | Core ML | Export to ML Program (iOS 17, fp16), only standard MIL ops (conv, instance_norm, linear, exp, reduce_mean, ...); ~19 MB | done (Mac parity check pending) |
 | Data | Unsplash Lite (25k photos, commercial-OK for training) + 8 synthetic creative directions; FiveK for stage 1 | done |
 | Stage 1 | Adaptive auto-enhance on FiveK (validation of the technique) | needs a rerun after the init fix |
-| Stage 2 | Reference-conditioned LUT prediction: look + match heads (v3) | done (first version) |
+| Stage 2 | Reference-conditioned LUT prediction: look + match heads (v4) | done (first version) |
 | Demo | Gradio UI: 3 side-by-side options, presets or custom reference, .cube export | done (local) |
 | On-device | Core ML model + Metal LUT application in Grade Studio | todo |
 
 ## Lessons learned
 
 - **Dead-gradient init.** A first version initialized both the basis LUTs (except identity) and the weight head to zero, so `grad(basis) ∝ weight` and `grad(weight) ∝ basis` stayed zero forever and the model collapsed to one global LUT. Fixed by a residual bank (`identity + Σ wᵢ·basisᵢ`, zero bases, random head).
-- **Instance norm erases color casts.** The CNN encoder alone can't see a look; explicit color statistics fixed that, and a joint RGB histogram gave the biggest jump when reference and photo share a scene.
+- **An encoder that ignored its input.** Blocks were `conv -> LeakyReLU -> InstanceNorm`, followed by a global mean. The spatial mean of an InstanceNorm output is exactly its bias, so the encoder returned the same vector for every image. Stage 1 could therefore only learn one global LUT (stuck at ~20.7 dB on FiveK), and the match models leaned entirely on the color statistics. Found by checking that predicted weights had zero variance across images; fixed with `conv -> norm -> activation`, plus a regression test.
+- **Instance norm erases color casts.** Even a working CNN encoder normalizes away per-channel means, i.e. the color casts that define a look; explicit color statistics fixed that, and a joint RGB histogram gave the biggest jump when reference and photo share a scene.
 - **Test the Core ML export first.** Shape arithmetic in `reshape` (`h*w`) traces to an `int` op coremltools can't convert; `-1` works.
 - **CPU-bound data loading.** Rendering LUTs at 17³ in workers and grading on the GPU gave a ~4x speed-up.
 
@@ -72,9 +76,9 @@ bash scripts/setup_wsl.sh                # venv (Python 3.12), PyTorch cu128, de
 source ~/.venvs/grademl/bin/activate
 python scripts/download_unsplash.py      # 25k photos -> $GRADEML_DATA/unsplash/images
 python scripts/resize_images.py unsplash/images unsplash/images_384 --size 384
-python scripts/train_match.py --config configs/match_v3.yaml
-python scripts/app.py --ckpt runs/match_v3/best.pt    # http://localhost:7860
-python scripts/export_coreml.py --model match --ckpt runs/match_v3/best.pt
+python scripts/train_match.py --config configs/match_v4.yaml
+python scripts/app.py --ckpt runs/match_v4/best.pt    # http://localhost:7860
+python scripts/export_coreml.py --model match --ckpt runs/match_v4/best.pt
 ```
 
 Datasets live at `$GRADEML_DATA` (default `~/grademl-data`, on the WSL filesystem for I/O speed).

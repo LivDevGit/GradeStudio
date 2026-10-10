@@ -28,3 +28,18 @@ def test_match_net_v2_shapes_and_identity_init():
     # Zero bases -> identity LUT before training, whatever the inputs.
     from grademl.lut import identity_lut
     assert torch.allclose(lut, identity_lut(33).expand_as(lut), atol=1e-6)
+
+
+def test_encoder_output_depends_on_input():
+    # Regression: an encoder ending in InstanceNorm + global mean outputs
+    # the norm's bias for every image.
+    from grademl.model import Encoder
+    torch.manual_seed(0)
+    enc = Encoder().eval()
+    with torch.no_grad():
+        a, b = enc(torch.rand(1, 3, 256, 256)), enc(torch.rand(1, 3, 256, 256) ** 3)
+    assert (a - b).abs().max() > 1e-3
+    legacy = Encoder(legacy=True).eval()
+    with torch.no_grad():
+        la, lb = legacy(torch.rand(1, 3, 256, 256)), legacy(torch.rand(1, 3, 256, 256) ** 3)
+    assert torch.allclose(la, lb, atol=1e-5)  # documents the old bug

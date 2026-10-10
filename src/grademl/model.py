@@ -19,26 +19,33 @@ from .lut import DEFAULT_SIZE, identity_lut
 INPUT_SIZE = 256  # models expect inputs already resized to this
 
 
-def _block(cin: int, cout: int) -> list[nn.Module]:
-    return [
-        nn.Conv2d(cin, cout, 3, stride=2, padding=1),
-        nn.LeakyReLU(0.2),
-        nn.InstanceNorm2d(cout, affine=True),
-    ]
+def _block(cin: int, cout: int, legacy: bool = False) -> list[nn.Module]:
+    conv = nn.Conv2d(cin, cout, 3, stride=2, padding=1)
+    if legacy:
+        # Original (buggy) order: the encoder ends in InstanceNorm, and the
+        # spatial mean of an InstanceNorm output is exactly its bias, so the
+        # encoder's output was the same constant for every image. Kept only
+        # so checkpoints trained with it still load.
+        return [conv, nn.LeakyReLU(0.2), nn.InstanceNorm2d(cout, affine=True)]
+    return [conv, nn.InstanceNorm2d(cout, affine=True), nn.LeakyReLU(0.2)]
 
 
 class Encoder(nn.Module):
-    """256x256 RGB -> feature vector. ~270K params."""
+    """256x256 RGB -> feature vector. ~270K params.
 
-    def __init__(self, width: int = 16, out_dim: int = 128):
+    conv -> norm -> activation, then global mean: the nonlinearity after the
+    norm is what makes the pooled features depend on the image.
+    """
+
+    def __init__(self, width: int = 16, out_dim: int = 128, legacy: bool = False):
         super().__init__()
         w = width
         self.body = nn.Sequential(
             nn.Conv2d(3, w, 3, stride=2, padding=1), nn.LeakyReLU(0.2),  # 128
-            *_block(w, 2 * w),          # 64
-            *_block(2 * w, 4 * w),      # 32
-            *_block(4 * w, 8 * w),      # 16
-            *_block(8 * w, out_dim),    # 8
+            *_block(w, 2 * w, legacy),          # 64
+            *_block(2 * w, 4 * w, legacy),      # 32
+            *_block(4 * w, 8 * w, legacy),      # 16
+            *_block(8 * w, out_dim, legacy),    # 8
         )
         self.out_dim = out_dim
 
@@ -83,9 +90,10 @@ def _head(in_dim: int, n_luts: int) -> nn.Linear:
 class AdaptiveLUTNet(nn.Module):
     """Stage 1: image -> LUT that enhances it."""
 
-    def __init__(self, n_luts: int = 3, lut_size: int = DEFAULT_SIZE, width: int = 16):
+    def __init__(self, n_luts: int = 3, lut_size: int = DEFAULT_SIZE, width: int = 16,
+                 legacy_encoder: bool = False):
         super().__init__()
-        self.encoder = Encoder(width)
+        self.encoder = Encoder(width, legacy=legacy_encoder)
         self.dropout = nn.Dropout(0.5)
         self.head = _head(self.encoder.out_dim, n_luts)
         self.luts = LUTBank(n_luts, lut_size)
@@ -166,9 +174,9 @@ class MatchLUTNet(nn.Module):
     """
 
     def __init__(self, n_luts: int = 24, lut_size: int = DEFAULT_SIZE, width: int = 16, hidden: int = 512,
-                 bins3d: int = 0, heads: int = 1):
+                 bins3d: int = 0, heads: int = 1, legacy_encoder: bool = False):
         super().__init__()
-        self.encoder = Encoder(width)
+        self.encoder = Encoder(width, legacy=legacy_encoder)
         self.stats = ColorStats(bins3d=bins3d)
         d = self.encoder.out_dim + self.stats.out_dim
         self.mlp = nn.Sequential(

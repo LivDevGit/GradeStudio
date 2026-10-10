@@ -1,0 +1,32 @@
+# Stage 2, v4: v3 with the fixed CNN encoder (conv -> norm -> act), warm-started from v3.
+name: match_v4
+seed: 0
+
+model:
+  n_luts: 64
+  lut_size: 33
+  hidden: 768
+  bins3d: 8              # joint RGB histogram, 8^3 cells
+  heads: 2               # look + match
+
+data:
+  images: unsplash/images_384   # relative to $GRADEML_DATA; made by scripts/resize_images.py
+  val_every_nth: 50         # every 50th photo is held out (~500 photos)
+  val_samples: 1000
+  p_generic: 0.35           # share of fully random looks vs named directions
+  p_same: 0.2               # reference = another crop of the same photo
+  p_identity: 0.2           # reference is an ordinary photo (no look)
+  batch_size: 32
+  workers: 14
+
+train:
+  init_from: runs/match_v3/best.pt
+  epochs: 20                # one epoch = one pass over the train photos
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 500
+  lambda_lut: 1.0           # L1 between predicted and true LUT
+  lambda_match: 1.0         # weight of the match head's losses
+  lambda_smooth: 1.0e-4
+  lambda_mono: 1.0          # own-channel monotonicity only
+  eval_every: 2
