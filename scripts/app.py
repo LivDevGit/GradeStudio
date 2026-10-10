@@ -27,10 +27,11 @@ import torch.nn.functional as F
 from grademl.data import data_root, load_rgb, resize
 from grademl.lut import apply_lut, identity_lut, write_cube
 from grademl.model import AdaptiveLUTNet, MatchLUTNet
-from grademl.synthetic import DIRECTIONS, list_images, random_look
+from grademl.pro_looks import DIRECTIONS, random_pro_look
+from grademl.synthetic import list_images
 
 N_OPTIONS = 3
-DEFAULT_DIRECTIONS = ["teal_orange", "warm_film", "cool_moody"]
+DEFAULT_DIRECTIONS = ["golden_hour", "teal_orange", "portra"]
 CUSTOM = "custom (upload a reference)"
 
 
@@ -69,28 +70,39 @@ def build_match_ui(model, ckpt, device, title):
     def preset_reference(direction: str, seed: float):
         if direction == CUSTOM:
             return gr.update()
-        look = random_look(torch.Generator().manual_seed(int(seed)), direction=direction)
+        # Preset references show the recipe at full strength (no random intensity).
+        look = random_pro_look(torch.Generator().manual_seed(int(seed)), direction=direction, strength=(1.0, 1.0))
         return to_image(apply_lut(canvas[None], look)[0])
 
     two_heads = model.match_head is not None
 
+    size = model.luts.basis.shape[-1]
+
     @torch.no_grad()
-    def generate(photo, strength, *refs_and_matches):
+    def generate(photo, strength, *per_option):
         if photo is None:
             raise gr.Error("Upload a photo first")
-        refs, matches = refs_and_matches[:N_OPTIONS], refs_and_matches[N_OPTIONS:]
+        n = N_OPTIONS
+        refs, matches, directions, seeds = (per_option[i * n:(i + 1) * n] for i in range(4))
         x = to_tensor(photo).to(device)[None]
         net_photo = resize(x)
         gallery, cubes = [], []
         tmp = Path(tempfile.mkdtemp())
-        for k, (ref, m) in enumerate(zip(refs, matches)):
-            if ref is None:
+        for k, (ref, m, d, sd) in enumerate(zip(refs, matches, directions, seeds)):
+            if d != CUSTOM:
+                # A preset is a known recipe: apply its LUT directly. Asking
+                # the model to re-infer it from a reference image only loses
+                # strength (regression to the mean).
+                lut = random_pro_look(torch.Generator().manual_seed(int(sd)), size=size,
+                                      direction=d, strength=(1.0, 1.0)).to(device)
+            elif ref is None:
                 continue
-            pred = model(net_photo, resize(to_tensor(ref).to(device)[None]))
-            if two_heads:  # blend "grade only" -> "match colors too"
-                lut = pred[0][0] + m * (pred[1][0] - pred[0][0])
             else:
-                lut = pred[0]
+                pred = model(net_photo, resize(to_tensor(ref).to(device)[None]))
+                if two_heads:  # blend "grade only" -> "match colors too"
+                    lut = pred[0][0] + m * (pred[1][0] - pred[0][0])
+                else:
+                    lut = pred[0]
             lut = ident + strength * (lut - ident)
             gallery.append((to_image(apply_lut(x, lut)[0]), f"Option {k + 1}"))
             cube = tmp / f"option_{k + 1}.cube"
@@ -101,13 +113,13 @@ def build_match_ui(model, ckpt, device, title):
     with gr.Blocks(title=title) as demo:
         gr.Markdown(f"## {title}\nModel `{ckpt.get('cfg', {}).get('name')}` epoch {ckpt.get('epoch')}, "
                     f"val PSNR {ckpt.get('psnr', float('nan')):.2f} dB. Each option takes its look from the "
-                    "reference above it: pick a creative direction (🎲 for another variation) or upload "
-                    "any image whose colors you like. *Match* = 0 copies only the grade (best for the "
-                    "presets and graded film stills); higher values also pull your photo's colors toward "
-                    "the reference's (best for ordinary photos as references).")
+                    "reference above it. Presets (🎲 for another variation) apply a pro-style recipe "
+                    "directly; for an uploaded reference the model predicts the LUT. *Match* = 0 copies only "
+                    "the reference's grade (graded film stills); 1 also maps your photo's palette onto the "
+                    "reference's (any photo you like).")
         with gr.Row():
             photo = gr.Image(label="Your photo", type="numpy", height=320)
-        refs, matches = [], []
+        refs, matches, directions, seeds = [], [], [], []
         with gr.Row():
             for k in range(N_OPTIONS):
                 with gr.Column():
@@ -120,17 +132,19 @@ def build_match_ui(model, ckpt, device, title):
                     match = gr.Slider(0, 1, value=0.0, step=0.05, label="Match: grade only -> colors too",
                                       visible=two_heads)
                     direction.change(preset_reference, [direction, seed], ref)
-                    direction.change(lambda d: 0.7 if d == CUSTOM else 0.0, direction, match)
+                    direction.change(lambda d: 1.0 if d == CUSTOM else 0.0, direction, match)
                     dice.click(lambda s: s + 100, seed, seed).then(preset_reference, [direction, seed], ref)
                     ref.upload(lambda: CUSTOM, None, direction)
                     refs.append(ref)
                     matches.append(match)
+                    directions.append(direction)
+                    seeds.append(seed)
         with gr.Row():
             strength = gr.Slider(0, 1.5, value=1.0, step=0.05, label="Intensity")
             btn = gr.Button("Grade my photo", variant="primary")
         gallery = gr.Gallery(label="Results", columns=N_OPTIONS + 1, height=420, object_fit="contain")
         cubes = gr.Files(label="LUTs (.cube) for each option")
-        inputs = [photo, strength, *refs, *matches]
+        inputs = [photo, strength, *refs, *matches, *directions, *seeds]
         btn.click(generate, inputs, [gallery, cubes])
         strength.release(generate, inputs, [gallery, cubes])
         for m in matches:

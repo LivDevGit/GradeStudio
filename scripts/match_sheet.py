@@ -8,6 +8,7 @@ Sheet 2 (real references): ungraded held-out photos used as references,
 Usage: python scripts/match_sheet.py --ckpt runs/match_unsplash/best.pt
 """
 import argparse
+import sys
 from pathlib import Path
 
 import torch
@@ -19,10 +20,14 @@ from grademl.data import data_root, load_rgb, resize
 from grademl.lut import apply_lut
 from grademl.metrics import psnr, rgb_to_lab
 from grademl.model import MatchLUTNet
-from grademl.synthetic import DIRECTIONS, list_images, random_look
-from grademl.transfer import transfer_lut
+from grademl.pro_looks import DIRECTIONS, random_pro_look
+from grademl.synthetic import list_images
+from grademl.transfer import palette_transfer_lut, transfer_lut
+
+TEACHERS = {'global': transfer_lut, 'palette': palette_transfer_lut}
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / 'scripts'))
 TILE = (192, 288)
 
 
@@ -78,7 +83,7 @@ def main() -> None:
     # Sheet 1: synthetic looks per direction.
     rows, labels, scores = [], [], []
     for d in DIRECTIONS:
-        look = random_look(g, direction=d)
+        look = random_pro_look(g, direction=d, strength=(1.0, 1.0))
         ref_scene, content = load_rgb(pick()), load_rgb(pick())
         reference = apply_lut(ref_scene[None], look)[0]
         target = apply_lut(content[None], look)[0]
@@ -97,17 +102,23 @@ def main() -> None:
     # near-gray photos can only ever receive a tint).
     mid = len(pool) // 2
     refs, contents = pool[:6], pool[mid - 3: mid + 3]
+    pairs = [(load_rgb(r), load_rgb(c), r.stem[:12]) for r, c in zip(refs, contents)]
+    samples = REPO / "data" / "samples"
+    if (samples / "arch_original.webp").exists():  # the user's own test pair first
+        from preview_pro_looks import load_any
+        pairs.insert(0, (load_any(samples / "ref_cinqueterre.jpg"), load_any(samples / "arch_original.webp"), "arch"))
     rows = []
-    for r, c in zip(refs, contents):
-        reference, content = load_rgb(r), load_rgb(c)
-        classic = apply_lut(content[None], transfer_lut(content[None], reference[None]))[0]
+    for reference, content, _ in pairs:
+        teacher = TEACHERS[ck['cfg']['train'].get('teacher', 'global')]
+        small = lambda x: F.interpolate(x[None], size=(256, 256), mode='area')
+        classic = apply_lut(content[None], teacher(small(content), small(reference)))[0]
         row = [tile(reference), tile(content), tile(predict(content, reference))]
         if two_heads:
             row.append(tile(predict(content, reference, head=1)))
         rows.append(row + [tile(classic)])
     header = ["reference (real photo)", "your photo", "model: look"]
     header += ["model: match"] if two_heads else []
-    save_sheet(rows, [r.stem[:12] for r in refs], header + ["classic transfer (teacher)"],
+    save_sheet(rows, [name for *_, name in pairs], header + ["teacher"],
                out / "match_real.jpg")
     print(f"synthetic mean psnr {sum(scores) / len(scores):.2f} dB")
 

@@ -3,7 +3,7 @@ import torch
 from grademl.color import lab_to_rgb, rgb_to_lab
 from grademl.lut import apply_lut
 from grademl.metrics import psnr
-from grademl.transfer import transfer_lut
+from grademl.transfer import palette_transfer_lut, transfer_lut
 
 FULL = dict(tone=1.0, tint=1.0, max_tint=100.0, spread=1.0)  # no damping
 
@@ -72,3 +72,24 @@ def test_damping_caps_the_tint():
     damped = apply_lut(content, transfer_lut(content, cyan, 17))
     shift = lambda x: (rgb_to_lab(x.permute(0, 2, 3, 1)) - rgb_to_lab(content.permute(0, 2, 3, 1)))[..., 1:].norm(dim=-1).mean()
     assert shift(damped) < 0.6 * shift(full)
+
+
+def test_palette_self_transfer_is_near_identity():
+    img = smooth_image(8)
+    out = apply_lut(img, palette_transfer_lut(img, img, size=17))
+    assert psnr(out, img).min() > 30
+
+
+def test_palette_transfer_keeps_separation():
+    # Content: half blue, half orange. Reference: teal and gold. Blue must map
+    # toward teal and orange toward gold, i.e. two different targets.
+    content = torch.zeros(1, 3, 32, 32)
+    content[..., :16] = torch.tensor([0.3, 0.5, 0.9]).view(1, 3, 1, 1)
+    content[..., 16:] = torch.tensor([0.9, 0.5, 0.2]).view(1, 3, 1, 1)
+    ref = torch.zeros(1, 3, 32, 32)
+    ref[..., :16] = torch.tensor([0.1, 0.55, 0.55]).view(1, 3, 1, 1)
+    ref[..., 16:] = torch.tensor([0.95, 0.75, 0.2]).view(1, 3, 1, 1)
+    out = apply_lut(content, palette_transfer_lut(content, ref, size=33))
+    left, right = out[..., :16].mean((2, 3)), out[..., 16:].mean((2, 3))
+    assert (left - right).abs().sum() > 0.5        # still clearly different colors
+    assert left[0, 2] > left[0, 0] and right[0, 0] > right[0, 2]   # cool stays cool, warm stays warm

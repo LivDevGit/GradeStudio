@@ -335,6 +335,8 @@ class SyntheticMatchPairs(Dataset):
     p_same: probability that the reference is another random crop of the
     *same* photo (train only). Easier pairs that teach the model to compare
     colors directly; the rest use a different scene.
+    p_pro: probability of a pro-style look (grademl.pro_looks) instead of
+    the original generator.
     p_identity: probability of no look at all, i.e. the reference is an
     ordinary photo. Teaches the look head that natural photos carry no
     grade, and gives the match head natural references to learn from.
@@ -342,7 +344,8 @@ class SyntheticMatchPairs(Dataset):
 
     def __init__(self, images: list[Path], train: bool = True, length: int | None = None,
                  strength: float = 1.0, render_size: int = 17, seed: int = 0,
-                 p_generic: float = 0.35, p_same: float = 0.0, p_identity: float = 0.0):
+                 p_generic: float = 0.35, p_same: float = 0.0, p_identity: float = 0.0,
+                 p_pro: float = 0.0):
         if len(images) < 2:
             raise ValueError("need at least 2 base images")
         self.images, self.train = images, train
@@ -350,6 +353,7 @@ class SyntheticMatchPairs(Dataset):
         self.strength, self.render_size, self.seed, self.p_generic = strength, render_size, seed, p_generic
         self.p_same = p_same if train else 0.0
         self.p_identity = p_identity
+        self.p_pro = p_pro  # share of looks from grademl.pro_looks (HSL, qualifiers, film recipes)
 
     def __len__(self) -> int:
         return self.length
@@ -376,6 +380,9 @@ class SyntheticMatchPairs(Dataset):
         g = torch.Generator().manual_seed(rng.getrandbits(63))
         if self.p_identity and rng.random() < self.p_identity:
             lut = identity_lut(self.render_size)
+        elif self.p_pro and rng.random() < self.p_pro:
+            from .pro_looks import render_pro_look, sample_pro_look
+            lut = render_pro_look(sample_pro_look(g), self.render_size)
         else:
             lut = render_look(sample_look(g, strength=self.strength, p_generic=self.p_generic), self.render_size)
         return self._load(self.images[a], rng), self._load(self.images[b], rng), lut

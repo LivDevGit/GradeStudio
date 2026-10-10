@@ -37,6 +37,17 @@ v1–v3 were trained with a CNN encoder whose output was constant (see *Lessons 
 
 Match head vs. the classic-transfer teacher it imitates: **36.27 dB** (v5; v4: 35.86, v3: 34.97) with natural photos as references, 36.09 dB with graded ones (no-op: 16.9 dB). The look head alone stays far from the teacher (17.3 dB), so the two heads really do different things and the "match" slider spans a meaningful range.
 
+### v6: pro-style looks and palette transfer
+
+Feedback from testing on real photos: the grades were too timid to read as a creative, photographer-level look. Two changes:
+
+- **Pro looks** (`grademl.pro_looks`): a colorist-style pipeline with hue-selective HSL (8 sectors), hue-qualified color wheels (e.g. warm highlights that stay off the sky, so warm/cool separation survives), filmic tone and 14 recipes (golden hour, teal & orange, Portra, Fuji Chrome, Cinestill 800T, bleach bypass, autumn, ...). Preview: `scripts/preview_pro_looks.py`.
+- **Palette transfer** (`grademl.transfer.palette_transfer_lut`): k-means palettes of photo and reference, each photo cluster pulled toward its matched reference cluster, spread over the LUT with Gaussian kernels. The photo's sky takes the reference's blue, its warm surfaces take the reference's warm tones, instead of one global shift.
+
+v6 (from scratch, 40 epochs): look head 28.16 dB on held-out pro looks (v5 on the same looks: 23.34 dB); match head 32.75 dB vs the palette teacher.
+
+**Design decision:** presets are known recipes, so the app applies their LUTs directly. Routing a preset through the model (preset reference image -> predicted LUT) visibly weakened it: an L1-trained regressor hedges toward milder looks when unsure. The model is used where it is needed, for user-supplied references.
+
 `scripts/match_sheet.py` renders visual reports (`exports/match_synthetic.jpg`, `exports/match_real.jpg`).
 
 ## Pipeline
@@ -47,7 +58,7 @@ Match head vs. the classic-transfer teacher it imitates: **36.27 dB** (v5; v4: 3
 | Core ML | Export to ML Program (iOS 17, fp16), only standard MIL ops (conv, instance_norm, linear, exp, reduce_mean, ...); ~19 MB | done (Mac parity check pending) |
 | Data | Unsplash Lite (25k photos, commercial-OK for training) + 8 synthetic creative directions; FiveK for stage 1 | done |
 | Stage 1 | Adaptive auto-enhance on FiveK (validation of the technique): 23.67 dB test PSNR vs 17.80 no-op (was 20.9 with the broken encoder; the paper reports 25.2 on its own FiveK variant) | done |
-| Stage 2 | Reference-conditioned LUT prediction: look + match heads (v5) | done (first version) |
+| Stage 2 | Reference-conditioned LUT prediction: look + match heads (v6, pro looks + palette teacher) | done (second version) |
 | Demo | Gradio UI: 3 side-by-side options, presets or custom reference, .cube export | done (local) |
 | On-device | Core ML model + Metal LUT application in Grade Studio | todo |
 
@@ -77,9 +88,9 @@ bash scripts/setup_wsl.sh                # venv (Python 3.12), PyTorch cu128, de
 source ~/.venvs/grademl/bin/activate
 python scripts/download_unsplash.py      # 25k photos -> $GRADEML_DATA/unsplash/images
 python scripts/resize_images.py unsplash/images unsplash/images_384 --size 384
-python scripts/train_match.py --config configs/match_v5.yaml
-python scripts/app.py --ckpt runs/match_v5/best.pt    # http://localhost:7860
-python scripts/export_coreml.py --model match --ckpt runs/match_v5/best.pt
+python scripts/train_match.py --config configs/match_v6.yaml
+python scripts/app.py --ckpt runs/match_v6/best.pt    # http://localhost:7860
+python scripts/export_coreml.py --model match --ckpt runs/match_v6/best.pt
 ```
 
 Datasets live at `$GRADEML_DATA` (default `~/grademl-data`, on the WSL filesystem for I/O speed).

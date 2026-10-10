@@ -21,7 +21,7 @@ import torch
 import torch.nn.functional as F
 
 from .color import lab_to_rgb, rgb_to_lab
-from .lut import DEFAULT_SIZE, identity_lut
+from .lut import DEFAULT_SIZE, apply_lut, identity_lut
 
 L_BINS = 101                       # luminance curve resolution (L* 0..100)
 BAND_CENTERS = (15.0, 50.0, 85.0)  # shadows, mids, highlights (L*)
@@ -154,4 +154,86 @@ def transfer_lut(content: torch.Tensor, reference: torch.Tensor, size: int = DEF
     content_tint = w @ mc
     ab_out = (lab[..., 1:] - content_tint) @ t.transpose(1, 2) + content_tint + w @ shift
     out = lab_to_rgb(torch.cat([l_out[..., None], ab_out], -1))  # (B, N, 3)
+    return out.permute(0, 2, 1).reshape(b, 3, size, size, size).contiguous()
+
+
+# ---------------------------------------------------------------- palette transfer
+
+def _kmeans(x: torch.Tensor, k: int, iters: int = 12) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batched k-means. x: (B, N, D). Returns centers (B, k, D) and mass (B, k).
+    Farthest-point init, so the result is deterministic and covers rare
+    but distinct colors (a small red car, a patch of sky)."""
+    b, n, _ = x.shape
+    idx = torch.zeros(b, k, dtype=torch.long, device=x.device)
+    mean = x.mean(1, keepdim=True)
+    idx[:, 0] = (x - mean).norm(dim=-1).argmin(1)
+    dmin = torch.full((b, n), float("inf"), device=x.device)
+    for j in range(1, k):
+        c = x.gather(1, idx[:, j - 1, None, None].expand(-1, 1, x.shape[2]))
+        dmin = torch.minimum(dmin, (x - c).norm(dim=-1))
+        idx[:, j] = dmin.argmax(1)
+    centers = x.gather(1, idx[..., None].expand(-1, -1, x.shape[2]))
+    for _ in range(iters):
+        assign = torch.cdist(x, centers).argmin(-1)                      # (B, N)
+        onehot = F.one_hot(assign, k).float()                            # (B, N, k)
+        mass = onehot.sum(1)                                             # (B, k)
+        new = onehot.transpose(1, 2) @ x / mass.clamp_min(1)[..., None]
+        centers = torch.where(mass[..., None] > 0, new, centers)
+    return centers, mass / n
+
+
+@torch.no_grad()
+def palette_transfer_lut(content: torch.Tensor, reference: torch.Tensor, size: int = DEFAULT_SIZE,
+                         k: int = 7, strength_ab: float = 1.0, strength_l: float = 0.5,
+                         sigma: float = 22.0, match_temp: float = 15.0,
+                         global_kw: dict | None = None) -> torch.Tensor:
+    """Palette-aware color transfer baked into a LUT.
+
+    1. A global transfer (transfer_lut, less damped than its defaults) moves
+       the overall tone and color balance toward the reference.
+    2. Both images are clustered into k color groups (k-means in Lab, L*
+       down-weighted so clusters follow color more than brightness).
+    3. Each content cluster, *after* the global transfer, is matched softly
+       to the reference clusters it is closest to (weighted by how much of
+       the reference they cover). Its color is pulled toward that match:
+       the photo's sky takes the reference's blue, its warm stone takes the
+       reference's warm walls. Different clusters map to different targets,
+       which keeps the separation between elements.
+    4. The per-cluster corrections are spread smoothly over color space with
+       Gaussian kernels around the content clusters (colors far from every
+       cluster get no extra shift), giving a smooth LUT.
+    """
+    b = content.shape[0]
+    gkw = dict(tone=0.85, tint=0.9, max_tint=30.0, spread=1.0) | (global_kw or {})
+    glut = transfer_lut(content, reference, size, **gkw)              # (B, 3, D, D, D)
+
+    lab_c, lab_r = _pixels_lab(content), _pixels_lab(reference)       # (B, N, 3)
+    wl = torch.tensor([0.5, 1.0, 1.0], device=content.device)        # down-weight L*
+    cc, _ = _kmeans(lab_c * wl, k)
+    rc, rmass = _kmeans(lab_r * wl, k)
+    cc, rc = cc / wl, rc / wl
+
+    # Content cluster centers after the global transfer: sample the global
+    # LUT at their RGB colors.
+    c_rgb = lab_to_rgb(cc)                                             # (B, k, 3)
+    c_glob = rgb_to_lab(apply_lut(c_rgb.permute(0, 2, 1)[..., None], glut)[..., 0].permute(0, 2, 1))
+
+    # Soft match to reference clusters (chroma matters more than lightness).
+    d = torch.cdist(c_glob * wl, rc * wl)                              # (B, k, k)
+    p = torch.softmax(-d / match_temp + torch.log(rmass.clamp_min(1e-4))[:, None, :], -1)
+    target = p @ rc                                                    # (B, k, 3)
+    delta = (target - c_glob) * torch.tensor([strength_l, strength_ab, strength_ab], device=content.device)
+
+    # Spread the corrections over the LUT grid around the content clusters.
+    grid_rgb = identity_lut(size, device=content.device).reshape(3, -1).T
+    grid_lab = rgb_to_lab(grid_rgb).expand(b, -1, -1)                  # (B, N, 3) original colors
+    phi = torch.exp(-0.5 * (torch.cdist(grid_lab * wl, cc * wl) / sigma) ** 2)   # (B, N, k)
+    resid = phi @ delta / (phi.sum(-1, keepdim=True) + 0.15)           # +0.15: fade far from clusters
+    # Neutrals keep most of their (global) color: gate the chroma part.
+    chroma = grid_lab[..., 1:].norm(dim=-1, keepdim=True)
+    gate = chroma**2 / (chroma**2 + 8.0**2)
+    resid = torch.cat([resid[..., :1], resid[..., 1:] * gate], -1)
+
+    g_lab = rgb_to_lab(glut.reshape(b, 3, -1).permute(0, 2, 1))        # global result on the grid
+    out = lab_to_rgb(g_lab + resid)
     return out.permute(0, 2, 1).reshape(b, 3, size, size, size).contiguous()

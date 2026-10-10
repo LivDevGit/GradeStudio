@@ -30,10 +30,12 @@ from grademl.lut import apply_lut, lut_monotonicity, lut_smoothness
 from grademl.metrics import delta_e76, psnr
 from grademl.model import MatchLUTNet
 from grademl.synthetic import SyntheticMatchPairs, list_images, make_match_batch
-from grademl.transfer import transfer_lut
+from grademl.transfer import palette_transfer_lut, transfer_lut
 from grademl.utils import seed_everything, worker_init
 
 REPO = Path(__file__).resolve().parents[1]
+TEACHERS = {"global": transfer_lut, "palette": palette_transfer_lut}
+TEACHER = "global"  # set from cfg["train"]["teacher"] in main()
 
 
 def as_heads(pred) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -66,7 +68,7 @@ def evaluate(model, loader, device, n_samples: int = 6):
         scores["psnr_identity"] += psnr(content, target).tolist()
         row = [reference, content, out, target]
         if match is not None:
-            teacher = transfer_lut(content, reference, size)
+            teacher = TEACHERS[TEACHER](content, reference, size)
             m_out, t_out = apply_lut(content, match), apply_lut(content, teacher)
             scores["match_psnr"] += psnr(m_out, t_out).tolist()
             scores["match_lut_l1"] += (match - teacher).abs().flatten(1).mean(1).tolist()
@@ -95,6 +97,8 @@ def main() -> None:
     if args.name:
         cfg["name"] = args.name
     tc, dc = cfg["train"], cfg["data"]
+    global TEACHER
+    TEACHER = tc.get("teacher", "global")
 
     seed_everything(cfg["seed"])
     device = torch.device("cuda")
@@ -108,7 +112,7 @@ def main() -> None:
     held_out = set(val_photos)
     train_photos = [p for p in photos if p not in held_out][: args.limit]
     lut_size = cfg["model"]["lut_size"]
-    common = dict(p_generic=dc["p_generic"], p_identity=dc.get("p_identity", 0.0))
+    common = dict(p_generic=dc["p_generic"], p_identity=dc.get("p_identity", 0.0), p_pro=dc.get("p_pro", 0.0))
     train_set = SyntheticMatchPairs(train_photos, train=True, p_same=dc.get("p_same", 0.0), **common)
     val_set = SyntheticMatchPairs(val_photos, train=False, length=dc["val_samples"], **common)
     train_loader = DataLoader(train_set, batch_size=dc["batch_size"], shuffle=True, drop_last=True,
@@ -146,7 +150,7 @@ def main() -> None:
             img_l1, lut_l1, loss = lut_losses(look, lut, content, tc)
             loss = loss + tc["lambda_smooth"] * lut_smoothness(model.luts.basis)
             if two_heads:
-                teacher = transfer_lut(content, reference, lut_size)
+                teacher = TEACHERS[TEACHER](content, reference, lut_size)
                 m_img, m_lut, m_loss = lut_losses(match, teacher, content, tc)
                 loss = loss + tc.get("lambda_match", 1.0) * m_loss
 
