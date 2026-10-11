@@ -89,6 +89,93 @@ when there is a person and the reasons for the choice.
 LUTs cannot hold spatial noise, so it is a procedural step after the LUT,
 soft-light blended so it lives in the midtones like film grain.
 
+### v7: local grading — GradeNet-L, people & skin, content-aware matching
+
+Everything up to v6 applies **one color mapping to the whole photo**. It
+cannot recover a blown sky without darkening the subject, protect skin
+while the rest takes a strong look, or separate foreground from distance.
+Colorists do that with masks; v7 learns it.
+
+**GradeNet-L** (`grademl.local`): the network predicts K = 4 LUTs and a
+bilateral grid (16 x 16 x 8 luma bins) of blend weights. Every pixel takes
+a softmax mix of the 4 LUTs, read from the grid at its position *and its
+own luminance* (HDRNet-style slicing), so the blend follows the photo's
+edges and no segmentation runs on device. Applying it at full resolution
+is 4 LUT passes plus one tiny kernel (`grademl.local.slice_packed` is the
+reference; `ios/LocalGrade.ci.metal` the integration sketch).
+
+**Local targets** (`grademl.local_looks`): the masks a colorist would draw
+come from OneFormer (sky, people, plants, water, buildings; MIT) and Depth
+Anything V2 (Apache-2.0), precomputed once (`scripts/label_scenes.py`), and
+are used only to build training targets:
+
+- sky: density and color in the look's own palette (pre-look, so B&W gets a red-filter sky)
+- people: gentler look, light on the subject, calmer background
+- skin: natural hue and chroma under every look (halfway back to the photo's skin, then toward the skin line), a little light on faces
+- depth: aerial perspective (distant parts softer, in the look's "air" tint)
+- vignette, held off the highlights
+- input faults to fix: bright sky over dark ground, backlit subject, graduated light fall-off, color casts on the subject only (foliage bounce, open shade, mixed light)
+
+People are ~10% of Unsplash, so v2/v3 oversample them, center half of their
+crops on the person, and weight the loss toward people (x4) and skin (x6).
+
+Held-out photos with faults, all models measured on the same v7 targets
+(`scripts/eval_local.py`; PSNR in dB, skin hue error in degrees):
+
+| | all photos | sky | people photos | person | skin | skin hue |
+|---|---|---|---|---|---|---|
+| fixed preset | 25.41 | | 25.31 | | | |
+| GradeNet v1 (one LUT) | 25.77 | 22.03 | 25.61 | 26.43 | 22.44 | 9.2° |
+| GradeNet-L v1 | **27.80** | 27.07 | 27.23 | 26.51 | 22.98 | 9.8° |
+| GradeNet-L v2 (people x5) | 27.50 | 26.92 | **27.92** | **27.87** | **25.35** | **6.3°** |
+| **GradeNet-L v3** (people x2.5, shipped) | 27.70 | **27.12** | 27.84 | 27.75 | 25.22 | 6.7° |
+
+The sky gain (+5 dB over one LUT) is the clearest local effect; the people
+work cut skin hue error by a third. The editor's top 3 (`grademl.editor`)
+runs on GradeNet-L with the same scoring as v1, intensities capped at 100%.
+
+On FiveK (real expert retouches, research only), the same local network
+reaches 24.26 dB vs 24.13 dB for an identical network with one LUT and
+23.67 dB for the previous model: most of that gain is the stronger
+backbone, because FiveK's expert edits are mostly global.
+
+**Content-aware matching** (`grademl.semantic_match`): DINOv2 (ViT-S/14,
+Apache-2.0) patch features find, for each region of the photo, the same
+*kind of thing* in the reference (sky to sky, skin to skin, foliage to
+foliage); color transfers per region, tone stays mostly global (per-region
+tone curves left seams). Global and palette transfer turn skin gray or
+muddy a purple sky when the reference's colors sit elsewhere; the semantic
+match does not (`scripts/semantic_sheet.py` -> `exports/semantic_match.jpg`).
+
+**MatchNet-L** (`grademl.local.MatchLocalNet`) distills that matcher into a
+7.5M-parameter on-device network: both images through the same conv stem,
+then every photo cell *attends to* the reference cells (cross-attention on
+features + cell colors) and the result drives the LUTs and the grid. It is
+residual on the global transfer (which the existing match model already
+reproduces), so it only has to learn the region-by-region part. Trained on
+49k pairs (`scripts/make_match_pairs.py`: mostly content neighbours, the
+reference through a random pro look), teacher precomputed:
+
+| vs the DINOv2 teacher (1000 held-out pairs) | PSNR |
+|---|---|
+| no-op | 17.96 dB |
+| global transfer | 33.28 dB |
+| MatchNet-L v1 (non-residual) | 31.66 dB |
+| **MatchNet-L v2 (residual)** | **34.71 dB** |
+
+Visually MatchNet-L stays close to the global transfer
+(`exports/match_local.jpg`): it learns part of the teacher's per-region
+changes, which are themselves subtle. The DINOv2 matcher is the stronger
+tool; MatchNet-L is its first on-device approximation. On device its
+`content` input is the photo *after* the global transfer (the existing
+match model's match LUT), see `scripts/train_match_local.py`.
+
+Lessons from v7:
+- **A student that must relearn the easy part plateaus below it.** Non-residual MatchNet-L stalled under the global transfer it was supposed to beat; making it residual put it above in 2 epochs.
+- **Oversampling trades.** People x5 bought skin quality but cost 0.3 dB on everything else; x2.5 after it kept most of both.
+- **Per-region tone curves seam.** In smooth dark areas region boundaries became visible bands; tone mostly global, color per region fixed it.
+- Infrastructure: one GPU process with DataLoader workers labels 25k photos at ~18/s; parallel model copies overflowed 12 GB VRAM into shared memory and ran at <1/s.
+
 ### Subject-aware grading
 
 The look can be graded differently on the person and on the background
@@ -135,6 +222,7 @@ OpenCV build that conflicts with the one this project uses.
 | Demo | Gradio UI: 3 side-by-side options, presets or custom reference, .cube export | done (local) |
 | Subject-aware | Person mask (DeepLabV3 locally, Vision on iOS) + split grading of subject and background | done in Python; Swift written, untested on device |
 | GradeNet | Per-photo correction + grading in 14 directions, Best version editor, free grain | done in Python; Core ML export done; Swift written, untested on device |
+| v7 local | GradeNet-L v3 (local edits, people & skin), semantic matching, MatchNet-L; Core ML exports | done in Python; app integration pending |
 | On-device | Core ML model + CIColorCube LUT application, preset bank, Surprise me (Swift written, untested on device) | in progress |
 
 ## Lessons learned
@@ -173,5 +261,6 @@ Datasets live at `$GRADEML_DATA` (default `~/grademl-data`, on the WSL filesyste
 ## Data & licensing
 
 - **Unsplash Lite** license allows training models for internal business use; check the terms (`$GRADEML_DATA/unsplash/TERMS.md`) before shipping.
+- **Label models** (training targets only, not shipped): OneFormer Swin-T ADE20K (MIT), Depth Anything V2 Small (Apache-2.0), DINOv2 ViT-S/14 (Apache-2.0).
 - **MIT-Adobe FiveK** is research-only and is used only to validate the technique (stage 1), never for the shipped model.
 - The looks themselves are synthetic (`grademl.synthetic`), so their exact LUTs are known.

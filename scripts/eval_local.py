@@ -20,7 +20,7 @@ Sheets:
                                     use for evaluation only): input | v1 | each local
 
 Usage:
-  python scripts/eval_local.py --local runs/grade_local_v1/best.pt runs/grade_local_v2/best.pt [--people]
+  python scripts/eval_local.py --local runs/grade_local_v3/best.pt runs/grade_local_v2/best.pt [--people]
 """
 import argparse
 from pathlib import Path
@@ -80,7 +80,7 @@ def hue_error(a, b, m):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--v1", default=str(REPO / "runs/grade_v1/best.pt"))
-    ap.add_argument("--local", nargs="+", default=[str(REPO / "runs/grade_local_v1/best.pt")])
+    ap.add_argument("--local", nargs="+", default=[str(REPO / "runs/grade_local_v3/best.pt")])
     ap.add_argument("--samples", type=int, default=1500)
     ap.add_argument("--people", action="store_true", help="only photos with a person")
     ap.add_argument("--real", type=int, default=8, help="FiveK inputs for the real-photo sheet (0: skip)")
