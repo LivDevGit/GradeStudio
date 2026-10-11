@@ -139,6 +139,27 @@ reaches 24.26 dB vs 24.13 dB for an identical network with one LUT and
 23.67 dB for the previous model: most of that gain is the stronger
 backbone, because FiveK's expert edits are mostly global.
 
+**Editor ranking fix** (`grademl.editor.score_candidates`, `scripts/editor_report.py`).
+The top-3 editor leaned on a few dramatic looks: on 250 held-out photos
+five looks took 91% of the #1 picks, B&W / bleach bypass 23%, and five looks
+never won. The cause was per-look, not per-photo: golden hour always changes
+a lot (a fixed "bold" bonus) and B&W leaves the critic nothing to correct (a
+fixed critic advantage). Now (1) critic and bold are calibrated per look
+against their mean over 250 *other* held-out photos
+(`configs/editor_calibration.json`), (2) a "keep" penalty stops looks from
+draining a colorful photo (B&W stays an option for muted scenes), and (3)
+the top 3 come from three different look families.
+
+| 250 held-out photos | before | after |
+|---|---|---|
+| B&W / bleach bypass as #1 | 23% | 4% |
+| looks that ever win #1 | 12 of 15 | 15 of 15 |
+| "natural" offered in the top 3 | 0% | 45% |
+
+Re-run `python scripts/editor_report.py --calibrate --offset 250 --n 250`
+after retraining GradeNet-L (the calibration belongs to a checkpoint).
+
+
 **Content-aware matching** (`grademl.semantic_match`): DINOv2 (ViT-S/14,
 Apache-2.0) patch features find, for each region of the photo, the same
 *kind of thing* in the reference (sky to sky, skin to skin, foliage to
