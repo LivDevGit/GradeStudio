@@ -7,6 +7,7 @@ full-resolution photo happens outside the model (apply_lut / Metal).
 
 - AdaptiveLUTNet: content only (stage 1, FiveK auto-enhance).
 - MatchLUTNet: content + reference (stage 2, "match the look").
+- GradeNet: content + style, per-photo correction and grading (grademl.grade).
 """
 from __future__ import annotations
 
@@ -202,3 +203,40 @@ class MatchLUTNet(nn.Module):
         if self.match_head is None:
             return look
         return look, self.luts(self.match_head(h))
+
+
+class GradeNet(nn.Module):
+    """Photo + style -> LUT that edits *this* photo in that style.
+
+    style is a one-hot over STYLES: 0 = "none" (correction only), then the
+    colorist directions of grademl.pro_looks. Trained on Unsplash photos
+    (finished by their photographers) with technical faults added
+    (exposure, white balance, contrast, saturation, flat camera profile):
+    the target is the finished photo with the direction applied, toned down
+    where it would clip. So the net corrects the photo and grades it in one
+    pass, adapted to its content (grademl.grade).
+
+    With style "none" it is also the critic of grademl.grade.best_version:
+    the more a graded photo still needs correcting, the worse the grade.
+    """
+
+    def __init__(self, n_styles: int, n_luts: int = 48, lut_size: int = DEFAULT_SIZE, width: int = 16,
+                 hidden: int = 640, bins3d: int = 8, style_dim: int = 32):
+        super().__init__()
+        self.encoder = Encoder(width)
+        self.stats = ColorStats(bins3d=bins3d)
+        # Linear on the one-hot = a learned style embedding (and a plain
+        # linear layer in Core ML).
+        self.style = nn.Linear(n_styles, style_dim, bias=False)
+        d = self.encoder.out_dim + self.stats.out_dim + style_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(d, hidden), nn.LeakyReLU(0.2),
+            nn.Linear(hidden, hidden), nn.LeakyReLU(0.2), nn.Dropout(0.1),
+        )
+        self.head = _head(hidden, n_luts)
+        self.luts = LUTBank(n_luts, lut_size)
+
+    def forward(self, image: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
+        """image (B, 3, 256, 256); style (B, n_styles) one-hot."""
+        h = self.mlp(torch.cat([self.encoder(image), self.stats(image), self.style(style)], 1))
+        return self.luts(self.head(h))

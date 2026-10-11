@@ -1,0 +1,29 @@
+# GradeNet: per-photo correction + grading in each colorist direction
+# (grademl.grade). Unsplash only, so the model can ship (FiveK cannot).
+name: grade_v1
+seed: 0
+
+model:
+  n_luts: 48
+  lut_size: 33
+  hidden: 640
+  bins3d: 8
+  style_dim: 32
+
+data:
+  images: unsplash/images_384   # relative to $GRADEML_DATA
+  val_every_nth: 50             # same held-out photos as the match models
+  val_samples: 1500
+  p_clean: 0.15                 # no fault: a finished photo stays as it is
+  p_none: 0.25                  # style "none": correction only (also the critic)
+  batch_size: 32
+  workers: 14
+
+train:
+  epochs: 40
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 500
+  lambda_smooth: 1.0e-4
+  lambda_mono: 1.0
+  eval_every: 2

@@ -52,9 +52,74 @@ v6 (from scratch, 40 epochs): look head 28.16 dB on held-out pro looks (v5 on th
 
 `grademl.surprise` picks three bold looks for a photo: it profiles the image (sky, greenery, warm surfaces, darkness, colorfulness), scores the 14 directions, samples three from different families (warm / film / stylized / cool / soft / mono) at 1.0-1.3x preset intensity, and rejects variations that blow highlights or crush blacks. Rule-based for now; the interface allows swapping in a model that learns which options users keep.
 
+### GradeNet: the AI edits each photo, "Best versions"
+
+A preset applies the same color mapping to every photo. **GradeNet**
+(`grademl.grade`) looks at the photo and predicts the LUT for *it*: one
+network, the photo plus a style (`none` = correction only, or one of the 14
+directions) in, a 33^3 LUT out.
+
+Training (Unsplash only, so it can ship): the input is a finished photo
+with random technical faults (exposure, white balance, contrast,
+saturation, a flat camera profile); the target is the finished photo
+graded in the requested direction, toned down where the full direction
+would clip this photo. One pass therefore corrects the photo and grades it,
+adapted to its content. What a direction *means* comes from the colorist
+recipes (`grademl.pro_looks`); how to apply it to a given photo is learned.
+
+Held-out photos with faults, 40 epochs (`configs/grade_v1.yaml`):
+
+| | PSNR vs the finished, graded target |
+|---|---|
+| faulty photo as is | 23.16 dB |
+| fixed preset on the faulty photo | 27.02 dB |
+| **GradeNet, styled** | **28.31 dB** |
+| GradeNet, correction only | 27.70 dB |
+
+**🎬 Best versions** (`top_versions`): GradeNet grades the photo in all 14
+directions at three intensities, then judges every result itself: with
+style `none` it predicts how much a graded photo still needs correcting
+(less = reads as finished). Plus a bonus for a visible grade, penalties for
+clipping and for skin pushed off its natural color (person mask), and a
+small scene-fit prior. The editor shows its top 3 choices, ranked (one
+per style, each at its best intensity), each with subject-aware grading
+when there is a person and the reasons for the choice.
+
+**Film grain** (`grademl.grain`) is free on any grade (amount, size):
+LUTs cannot hold spatial noise, so it is a procedural step after the LUT,
+soft-light blended so it lives in the midtones like film grain.
+
+### Subject-aware grading
+
+The look can be graded differently on the person and on the background
+(`grademl.compose`): gentler on the subject so skin stays natural, full
+strength plus a "background pop" (a bit darker and calmer) behind, blended
+through a soft person mask. It works with every look source: presets,
+Surprise me and model predictions.
+
+The mask is the only platform-specific part (`grademl.mask`):
+
+| | Segmentation | Edges |
+|---|---|---|
+| Python (local) | torchvision DeepLabV3-ResNet101, COCO "person" (weights download once into the torch cache, ~240 MB; `--seg-model mobilenet` for a 42 MB, faster, blobbier one) | guided filter at 1024 px |
+| iOS (Grade Studio) | Vision `VNGeneratePersonSegmentationRequest`, built into the OS | `CIGuidedFilter` |
+
+With no person in the frame the photo gets the plain look. Try it without a checkpoint:
+
+```
+python scripts/subject_grade.py photo.jpg --look portra --cube
+```
+
+or in the Gradio app (accordion "Subject-aware"). A selfie segmenter
+(MediaPipe) was considered and dropped: it is trained on faces close to the
+camera and misses groups and people further away, and its package pulls an
+OpenCV build that conflicts with the one this project uses.
+
 ### App integration
 
-`scripts/export_presets.py` exports the presets as a LUT bank (84 x float16 33^3, 18 MB); `ios/GradeML.swift` has the Core ML runner, LUT blending and CIColorCube application, the preset loader and a Swift port of Surprise me; `docs/ios_integration.md` lists the Mac/iPhone verification steps (`scripts/check_coreml_parity.py`).
+`scripts/export_presets.py` exports the presets as a LUT bank (84 x float16 33^3, 18 MB, plus the subject-aware background LUT and defaults); `ios/GradeML.swift` has the Core ML runner, LUT blending and CIColorCube application, the preset loader, a Swift port of Surprise me and subject-aware grading (Vision mask + CIBlendWithMask); `docs/ios_integration.md` lists the Mac/iPhone verification steps (`scripts/check_coreml_parity.py`).
+
+`ios/GradeML.swift` also has `Grader` (GradeNet in Core ML) and `Editor.topVersions`, the Swift port of Best versions, plus `Grain`.
 
 `scripts/match_sheet.py` renders visual reports (`exports/match_synthetic.jpg`, `exports/match_real.jpg`).
 
@@ -68,6 +133,8 @@ v6 (from scratch, 40 epochs): look head 28.16 dB on held-out pro looks (v5 on th
 | Stage 1 | Adaptive auto-enhance on FiveK (validation of the technique): 23.67 dB test PSNR vs 17.80 no-op (was 20.9 with the broken encoder; the paper reports 25.2 on its own FiveK variant) | done |
 | Stage 2 | Reference-conditioned LUT prediction: look + match heads (v6, pro looks + palette teacher) | done (second version) |
 | Demo | Gradio UI: 3 side-by-side options, presets or custom reference, .cube export | done (local) |
+| Subject-aware | Person mask (DeepLabV3 locally, Vision on iOS) + split grading of subject and background | done in Python; Swift written, untested on device |
+| GradeNet | Per-photo correction + grading in 14 directions, Best version editor, free grain | done in Python; Core ML export done; Swift written, untested on device |
 | On-device | Core ML model + CIColorCube LUT application, preset bank, Surprise me (Swift written, untested on device) | in progress |
 
 ## Lessons learned

@@ -25,6 +25,8 @@ def main() -> None:
     args = ap.parse_args()
     vec = np.load(args.model.with_suffix("").with_suffix(".testvec.npz"))
     inputs = {k: Image.fromarray(vec[k]) for k in ("content", "reference") if k in vec}
+    if "style" in vec:  # GradeNet: style one-hot
+        inputs["style"] = vec["style"]
     expected = {k.removeprefix("expected_"): vec[k] for k in vec.files if k.startswith("expected_")}
 
     for unit in [ct.ComputeUnit.CPU_ONLY, ct.ComputeUnit.CPU_AND_GPU, ct.ComputeUnit.ALL]:
