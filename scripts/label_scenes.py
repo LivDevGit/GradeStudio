@@ -118,12 +118,18 @@ def main() -> None:
     ap.add_argument("--scale", type=float, default=0.5, help="output size relative to the photo")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--shard", default="0/1", help="i/n: label every n-th photo starting at i (parallel runs)")
+    ap.add_argument("--keep", help="JSON with a 'keep' list of file names (scripts/filter_quality.py): label only those")
     args = ap.parse_args()
 
     src, dst = data_root() / args.src, data_root() / args.dst
     dst.mkdir(parents=True, exist_ok=True)
     i, n = map(int, args.shard.split("/"))
-    paths = [p for p in list_images(src)[i::n] if not (dst / f"{p.stem}.npz").exists()][: args.limit]
+    paths = list_images(src)
+    if args.keep:
+        import json
+        keep = set(json.loads((data_root() / args.keep).read_text())["keep"])
+        paths = [p for p in paths if p.name in keep]
+    paths = [p for p in paths[i::n] if not (dst / f"{p.stem}.npz").exists()][: args.limit]
     print(f"{len(paths)} photos to label -> {dst}")
     dev = torch.device("cuda")
 

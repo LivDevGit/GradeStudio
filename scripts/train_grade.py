@@ -110,10 +110,25 @@ def main() -> None:
     val_photos = photos[:: dc["val_every_nth"]]
     held_out = set(val_photos)
     train_photos = [p for p in photos if p not in held_out][: args.limit]
+    # Extra photo sources for training (e.g. Open Images people). Validation
+    # stays on the main source so runs remain comparable; each extra source
+    # holds out every val_every_nth photo too (scripts/eval_local.py --source).
+    maps_dirs = {data_root() / dc["images"]: data_root() / dc.get("maps", "")}
+    for ex in dc.get("extra", []):
+        extra = list_images(data_root() / ex["images"])
+        if ex.get("keep"):
+            import json
+            keep = set(json.loads((data_root() / ex["keep"]).read_text())["keep"])
+            extra = [p for p in extra if p.name in keep]
+        extra_val = set(extra[:: ex.get("val_every_nth", 50)])
+        extra_train = [p for p in extra if p not in extra_val]
+        train_photos += extra_train
+        maps_dirs[data_root() / ex["images"]] = data_root() / ex["maps"]
+        print(f"extra source {ex['images']}: {len(extra_train)} train photos", flush=True)
     common = dict(p_clean=dc["p_clean"], p_none=dc["p_none"])
     arch = cfg.get("arch", "global")
     if arch == "local":
-        maps = data_root() / dc["maps"]
+        maps = maps_dirs if len(maps_dirs) > 1 else data_root() / dc["maps"]
         common["p_local"] = dc.get("p_local", 0.6)
         train_set = LocalGradePairs(train_photos, maps, train=True, p_person_crop=dc.get("p_person_crop", 0.0),
                                     **common)
@@ -122,11 +137,16 @@ def main() -> None:
         train_set = GradePairs(train_photos, train=True, **common)
         val_set = GradePairs(val_photos, train=False, length=dc["val_samples"], **common)
     sampler = None
-    if dc.get("person_boost", 1.0) != 1.0:
-        w = train_set.sample_weights(dc["person_boost"])
+    extra_weights = {data_root() / ex["images"]: ex.get("weight", 1.0) for ex in dc.get("extra", [])}
+    if dc.get("person_boost", 1.0) != 1.0 or any(v != 1.0 for v in extra_weights.values()):
+        w = train_set.sample_weights(dc.get("person_boost", 1.0))
+        if extra_weights:  # extra sources: their own weight instead of the person boost
+            w = torch.tensor([extra_weights.get(p.parent, float(wi)) for p, wi in zip(train_set.images, w)])
         sampler = torch.utils.data.WeightedRandomSampler(w, num_samples=len(train_set), replacement=True)
-        share = float(w[w > 1].sum() / w.sum())
-        print(f"person oversampling x{dc['person_boost']}: {share:.0%} of samples have a person", flush=True)
+        has = torch.tensor([c > 0.03 for c in train_set.coverage])
+        share = float(w[has].sum() / w.sum())
+        print(f"sampling: {share:.0%} of samples have a person (person boost x{dc.get('person_boost', 1.0)}, "
+              f"extra source weights {[ex.get('weight', 1.0) for ex in dc.get('extra', [])]})", flush=True)
     train_loader = DataLoader(train_set, batch_size=dc["batch_size"], shuffle=sampler is None, sampler=sampler,
                               drop_last=True,
                               num_workers=dc["workers"], pin_memory=True, persistent_workers=True,

@@ -35,7 +35,7 @@ REPO = Path(__file__).resolve().parents[1]
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default=str(REPO / "runs/grade_local_v3/best.pt"))
+    ap.add_argument("--ckpt", default=str(REPO / "runs/grade_local_v4/best.pt"))
     ap.add_argument("--n", type=int, default=300)
     ap.add_argument("--calibrate", action="store_true", help=f"write {CALIBRATION.name}")
     ap.add_argument("--raw", action="store_true", help="score without the calibration file")

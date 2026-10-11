@@ -12,7 +12,7 @@ Every edit is predicted from a 256px copy and applied to the full-resolution
 photo (K LUTs + bilateral grid), the same split as on device.
 
 Usage:
-  python scripts/local_demo.py                                   # runs/grade_local_v3/best.pt
+  python scripts/local_demo.py                                   # runs/grade_local_v4/best.pt
   python scripts/local_demo.py --ckpt runs/other/best.pt --port 7861
 Then open http://localhost:7860.
 """
@@ -64,7 +64,7 @@ def nice(style: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", type=Path, default=REPO / "runs/grade_local_v3/best.pt")
+    ap.add_argument("--ckpt", type=Path, default=REPO / "runs/grade_local_v4/best.pt")
     ap.add_argument("--port", type=int, default=7860)
     ap.add_argument("--share", action="store_true")
     ap.add_argument("--no-person", action="store_true", help="skip the person mask (skin check)")

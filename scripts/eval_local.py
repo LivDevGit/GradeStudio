@@ -12,7 +12,11 @@ casts, so older checkpoints are measured on the new targets too). Reports:
 
 for: preset (fixed recipe on the faulty photo), v1 (one LUT per photo) and
 each --local checkpoint. --people evaluates only photos with a person
-(> 3% of the frame), with more samples per photo.
+(> 3% of the frame), with more samples per photo; it also splits the skin
+metrics by skin tone (ITA angle of the photo's skin: light > 41 deg,
+medium 10-41, dark < 10), to check that every tone is served alike.
+--source / --maps evaluate on another photo source's held-out photos
+(every 50th, as in training), e.g. openimages/images_384.
 
 Sheets:
   exports/local_eval[_people].jpg   input | v1 | each local | target
@@ -20,7 +24,7 @@ Sheets:
                                     use for evaluation only): input | v1 | each local
 
 Usage:
-  python scripts/eval_local.py --local runs/grade_local_v3/best.pt runs/grade_local_v2/best.pt [--people]
+  python scripts/eval_local.py --local runs/grade_local_v4/best.pt runs/grade_local_v2/best.pt [--people]
 """
 import argparse
 from pathlib import Path
@@ -64,6 +68,24 @@ def masked_psnr(a, b, m):
     return torch.where(w > 0.02 * m[0].numel(), out, torch.full_like(out, float("nan")))
 
 
+TONES = ("light", "medium", "dark")
+
+
+def skin_tone(photo, m):
+    """Skin tone bucket per image from the ITA angle (Chardon et al.):
+    ITA = atan((L* - 50) / b*) over the skin mask. None where there is no skin."""
+    lab = rgb_to_lab(photo.permute(0, 2, 3, 1))
+    w = m[:, 0]
+    tot = w.sum((1, 2))
+    L = (lab[..., 0] * w).sum((1, 2)) / tot.clamp_min(1e-6)
+    b = (lab[..., 2] * w).sum((1, 2)) / tot.clamp_min(1e-6)
+    ita = torch.rad2deg(torch.atan2(L - 50, b.clamp_min(1e-3)))
+    out = []
+    for t, i in zip(tot.tolist(), ita.tolist()):
+        out.append(None if t < 0.01 * w[0].numel() else "light" if i > 41 else "medium" if i > 10 else "dark")
+    return out
+
+
 def hue_error(a, b, m):
     """Mean |hue difference| in degrees inside mask m, weighted by chroma
     (hue is meaningless on gray); NaN where the mask covers < 1%."""
@@ -80,10 +102,13 @@ def hue_error(a, b, m):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--v1", default=str(REPO / "runs/grade_v1/best.pt"))
-    ap.add_argument("--local", nargs="+", default=[str(REPO / "runs/grade_local_v3/best.pt")])
+    ap.add_argument("--local", nargs="+", default=[str(REPO / "runs/grade_local_v4/best.pt")])
     ap.add_argument("--samples", type=int, default=1500)
     ap.add_argument("--people", action="store_true", help="only photos with a person")
     ap.add_argument("--real", type=int, default=8, help="FiveK inputs for the real-photo sheet (0: skip)")
+    ap.add_argument("--source", help="photo folder to evaluate on (default: the checkpoint's)")
+    ap.add_argument("--maps", help="scene maps of --source")
+    ap.add_argument("--keep", help="quality filter JSON of --source (same held-out photos as training)")
     args = ap.parse_args()
     dev = torch.device("cuda")
 
@@ -91,8 +116,13 @@ def main() -> None:
     locs = [load(p, dev) for p in args.local]
     names = ["v1"] + [Path(p).parent.name for p in args.local]
     dc = locs[0][1]["cfg"]["data"]
-    maps_dir = data_root() / dc["maps"]
-    photos = list_images(data_root() / dc["images"])[:: dc["val_every_nth"]]
+    maps_dir = data_root() / (args.maps or dc["maps"])
+    photos = list_images(data_root() / (args.source or dc["images"]))
+    if args.keep:
+        import json
+        keep = set(json.loads((data_root() / args.keep).read_text())["keep"])
+        photos = [p for p in photos if p.name in keep]
+    photos = photos[:: dc["val_every_nth"]]
     if args.people:
         cov = person_coverage(maps_dir, photos)
         photos = [p for p, c in zip(photos, cov) if c > 0.03]
@@ -104,7 +134,7 @@ def main() -> None:
 
     keys = ["psnr", "sky", "person", "skin", "skin_hue"]
     res = {n: {k: [] for k in keys} for n in names}
-    preset, no_op, sheet = [], [], []
+    preset, no_op, sheet, tones = [], [], [], []
     for batch in DataLoader(val, batch_size=50, num_workers=6):
         photo, maps, fault, local, style = (t.to(dev) for t in batch)
         inp, tgt = make_local_batch(photo, maps, fault, local, style, recipes, bank)
@@ -116,6 +146,7 @@ def main() -> None:
         preset += psnr(apply_lut(inp[styled], recipes[style[styled]]), tgt[styled]).tolist()
         no_op += psnr(inp, tgt).tolist()
         m = region_masks(maps, photo)
+        tones += skin_tone(photo, m["skin"])
         for n, out in zip(names, outs):
             r = res[n]
             r["psnr"] += psnr(out, tgt).tolist()
@@ -136,6 +167,18 @@ def main() -> None:
         print(f"{n:18s}" + "".join(f"{v:10.2f}" for v in row))
     counts = {k: int(np.isfinite(np.array(res[names[0]][k], dtype=float)).sum()) for k in keys}
     print("samples per column: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
+    if args.people:
+        print("\nskin PSNR / skin hue error by skin tone (ITA)")
+        print(f"{'model':18s}" + "".join(f"{t:>18s}" for t in TONES))
+        for n in names:
+            cells = []
+            for t in TONES:
+                idx = [i for i, x in enumerate(tones) if x == t]
+                sk = np.nanmean(np.array([res[n]["skin"][i] for i in idx], dtype=float)) if idx else float("nan")
+                hu = np.nanmean(np.array([res[n]["skin_hue"][i] for i in idx], dtype=float)) if idx else float("nan")
+                cells.append(f"{sk:7.2f} / {hu:5.2f}deg")
+            print(f"{n:18s}" + "".join(f"{c:>18s}" for c in cells))
+        print("samples: " + ", ".join(f"{t} {tones.count(t)}" for t in TONES))
 
     out_dir = REPO / "exports"
     out_dir.mkdir(exist_ok=True)

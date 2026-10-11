@@ -356,14 +356,28 @@ class LocalGradePairs(torch.utils.data.Dataset):
                  p_local: float = 0.6, p_person_crop: float = 0.0, seed: int = 0):
         from pathlib import Path
 
-        self.maps_dir = Path(maps_dir)
-        self.images = [p for p in images if (self.maps_dir / f"{p.stem}.npz").exists()]
+        # maps_dir: one folder, or {image folder: maps folder} when photos come
+        # from several sources (Unsplash + Open Images people).
+        self.maps_dirs = ({Path(k): Path(v) for k, v in maps_dir.items()} if isinstance(maps_dir, dict)
+                          else None)
+        self.maps_dir = None if self.maps_dirs else Path(maps_dir)
+        self.images = [p for p in images if self.maps_path(p).exists()]
         self.train = train
         self.length = length or len(self.images)
         self.render_size, self.p_clean, self.p_none, self.p_local, self.seed = (
             render_size, p_clean, p_none, p_local, seed)
         self.p_person_crop = p_person_crop
-        self.coverage = person_coverage(self.maps_dir, self.images)
+        cov = {}
+        for folder in {p.parent for p in self.images}:
+            group = [p for p in self.images if p.parent == folder]
+            cov.update(zip(group, person_coverage(self.maps_path(group[0]).parent, group)))
+        self.coverage = [cov[p] for p in self.images]
+
+    def maps_path(self, image):
+        from pathlib import Path
+
+        folder = self.maps_dirs[Path(image).parent] if self.maps_dirs else self.maps_dir
+        return folder / f"{Path(image).stem}.npz"
 
     def sample_weights(self, person_boost: float) -> torch.Tensor:
         """Per-photo sampling weights: photos with a person (> 3% of the
@@ -395,7 +409,7 @@ class LocalGradePairs(torch.utils.data.Dataset):
         rng = random.Random() if self.train else random.Random(self.seed * 1_000_003 + i)
         path = self.images[i % len(self.images)]
         img = load_rgb(path)
-        maps = load_maps(self.maps_dir / f"{path.stem}.npz", img.shape[1:])
+        maps = load_maps(self.maps_path(path), img.shape[1:])
         if self.train:
             box = None
             if self.coverage[i % len(self.images)] > 0.03 and rng.random() < self.p_person_crop:

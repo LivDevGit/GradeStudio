@@ -139,6 +139,32 @@ reaches 24.26 dB vs 24.13 dB for an identical network with one LUT and
 23.67 dB for the previous model: most of that gain is the stronger
 backbone, because FiveK's expert edits are mostly global.
 
+**More and more varied people: Open Images** (v4). Unsplash has ~2.4k photos
+with a person. `scripts/download_openimages_people.py` takes Open Images'
+validation + test sets (human-verified person boxes, CC BY 2.0, attribution
+for every photo in `$GRADEML_DATA/openimages/attribution.csv`): photos where a
+person covers >= 10% of the frame, not a depiction, >= 640 px. 30,319
+downloaded (resized to 384 px, originals not kept); `scripts/filter_quality.py`
+keeps 22,699 (drops black and white and the photos the v3 critic finds far
+from finished, beyond Unsplash's 75th percentile). v4 = v3 fine-tuned on
+Unsplash + these, Open Images at sampling weight 0.4 (39% of samples have a
+person).
+
+Skin metrics are also split by skin tone (ITA angle of the photo's skin:
+light > 41 deg, medium 10-41, dark < 10). On photos ITA measures *apparent*
+tone, lighting included, so "dark" also holds lighter skin in dim light.
+
+| Open Images held-out people (431 photos) | person | skin | skin hue | skin light | skin medium | skin dark |
+|---|---|---|---|---|---|---|
+| GradeNet v1 (one LUT) | 25.17 | 22.85 | 10.1° | 20.77 / 12.4° | 21.94 / 9.6° | 23.52 / 9.9° |
+| GradeNet-L v3 | 26.42 | 25.09 | 7.3° | 23.23 / 8.6° | 23.87 / 7.4° | 25.85 / 7.0° |
+| **GradeNet-L v4** | **27.75** | **26.71** | **5.9°** | **25.44 / 7.9°** | **25.88 / 6.0°** | **27.23 / 5.6°** |
+
+On Unsplash people v4 also improves (skin 25.22 -> 25.81 dB, hue 6.7° ->
+6.0°); on all Unsplash photos it gives up 0.1 dB (27.70 -> 27.60; sky 27.12
+-> 26.97). v4 is the shipped GradeNet-L; the editor is recalibrated for it
+(B&W / bleach bypass as #1: 2%, all 15 looks can win).
+
 **Editor ranking fix** (`grademl.editor.score_candidates`, `scripts/editor_report.py`).
 The top-3 editor leaned on a few dramatic looks: on 250 held-out photos
 five looks took 91% of the #1 picks, B&W / bleach bypass 23%, and five looks
@@ -243,7 +269,7 @@ OpenCV build that conflicts with the one this project uses.
 | Demo | Gradio UI: 3 side-by-side options, presets or custom reference, .cube export | done (local) |
 | Subject-aware | Person mask (DeepLabV3 locally, Vision on iOS) + split grading of subject and background | done in Python; Swift written, untested on device |
 | GradeNet | Per-photo correction + grading in 14 directions, Best version editor, free grain | done in Python; Core ML export done; Swift written, untested on device |
-| v7 local | GradeNet-L v3 (local edits, people & skin), semantic matching, MatchNet-L; Core ML exports | done in Python; app integration pending |
+| v7 local | GradeNet-L v4 (local edits, people & skin, + Open Images people), semantic matching, MatchNet-L; Core ML exports | done in Python; app integration pending |
 | On-device | Core ML model + CIColorCube LUT application, preset bank, Surprise me (Swift written, untested on device) | in progress |
 
 ## Lessons learned
@@ -282,6 +308,7 @@ Datasets live at `$GRADEML_DATA` (default `~/grademl-data`, on the WSL filesyste
 ## Data & licensing
 
 - **Unsplash Lite** license allows training models for internal business use; check the terms (`$GRADEML_DATA/unsplash/TERMS.md`) before shipping.
+- **Open Images** people photos (v4): CC BY 2.0, attribution per photo in `openimages/attribution.csv`; training data only, never shipped.
 - **Label models** (training targets only, not shipped): OneFormer Swin-T ADE20K (MIT), Depth Anything V2 Small (Apache-2.0), DINOv2 ViT-S/14 (Apache-2.0).
 - **MIT-Adobe FiveK** is research-only and is used only to validate the technique (stage 1), never for the shipped model.
 - The looks themselves are synthetic (`grademl.synthetic`), so their exact LUTs are known.
