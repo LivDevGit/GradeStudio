@@ -1,0 +1,32 @@
+# MatchNet-L v2 (residual on the global transfer, init from v1): content-aware reference matching on device, distilled from the
+# DINOv2 teacher (grademl.semantic_match) via scripts/make_match_pairs.py.
+name: match_local_v2
+seed: 0
+residual: true
+
+model:
+  k: 4
+  n_luts: 32
+  lut_size: 33
+  width: 24
+  hidden: 640
+  bins3d: 8
+  grid_bins: 8
+  attn_dim: 96
+
+data:
+  images: unsplash/images_384
+  teacher: unsplash/match_teacher
+  val_samples: 1000
+  batch_size: 32
+  workers: 6
+
+train:
+  epochs: 16
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 500
+  lambda_smooth: 1.0e-4
+  lambda_mono: 1.0
+  lambda_grid: 1.0e-3
+  eval_every: 2

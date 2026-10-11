@@ -25,7 +25,7 @@ from torchvision.utils import make_grid
 from grademl.data import data_root
 from grademl.grade import STYLES, GradePairs, make_grade_batch, recipe_luts, style_onehot
 from grademl.local import LocalGradeNet, apply_local, grid_tv
-from grademl.local_looks import FinishBank, LocalGradePairs, make_local_batch
+from grademl.local_looks import FinishBank, LocalGradePairs, loss_weights, make_local_batch
 from grademl.lut import apply_lut, lut_monotonicity, lut_smoothness
 from grademl.metrics import delta_e76, psnr
 from grademl.model import GradeNet
@@ -35,14 +35,15 @@ from grademl.utils import seed_everything, worker_init
 REPO = Path(__file__).resolve().parents[1]
 
 
-def build(batch, device, recipes, bank):
-    """Move a loader batch to the GPU -> (clean photo, input, target, style)."""
+def build(batch, device, recipes, bank, weights: dict | None = None):
+    """Move a loader batch to the GPU -> (clean photo, input, target, style, loss weights or None)."""
     batch = [t.to(device, non_blocking=True) for t in batch]
     if bank is None:
         photo, fault, style = batch
-        return (photo, *make_grade_batch(photo, fault, style, recipes), style)
+        return (photo, *make_grade_batch(photo, fault, style, recipes), style, None)
     photo, maps, fault, local, style = batch
-    return (photo, *make_local_batch(photo, maps, fault, local, style, recipes, bank), style)
+    w = loss_weights(maps, photo, **weights) if weights else None
+    return (photo, *make_local_batch(photo, maps, fault, local, style, recipes, bank), style, w)
 
 
 def predict(model, inp, style, device):
@@ -60,7 +61,7 @@ def evaluate(model, loader, device, recipes, bank=None, n_samples: int = 8):
     scores = {k: [] for k in ["psnr", "delta_e", "psnr_none", "psnr_styled", "preset_styled", "no_op"]}
     samples = []
     for batch in loader:
-        photo, inp, tgt, style = build(batch, device, recipes, bank)
+        photo, inp, tgt, style, _ = build(batch, device, recipes, bank)
         out = predict(model, inp, style, device)[0]
         p = psnr(out, tgt)
         # Faulty inputs only: on a fault-free photo the fixed preset is the
@@ -86,6 +87,9 @@ def main() -> None:
     ap.add_argument("--epochs", type=int)
     ap.add_argument("--name")
     ap.add_argument("--limit", type=int, help="use only N train photos (smoke tests)")
+    ap.add_argument("--init", type=Path, help="start from these weights (fine-tune; fresh LR schedule)")
+    ap.add_argument("--resume", type=Path, help="continue from a checkpoint (weights; the LR schedule is "
+                    "fast-forwarded to its epoch, optimizer moments start fresh)")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(args.config.read_text())
@@ -111,12 +115,20 @@ def main() -> None:
     if arch == "local":
         maps = data_root() / dc["maps"]
         common["p_local"] = dc.get("p_local", 0.6)
-        train_set = LocalGradePairs(train_photos, maps, train=True, **common)
+        train_set = LocalGradePairs(train_photos, maps, train=True, p_person_crop=dc.get("p_person_crop", 0.0),
+                                    **common)
         val_set = LocalGradePairs(val_photos, maps, train=False, length=dc["val_samples"], **common)
     else:
         train_set = GradePairs(train_photos, train=True, **common)
         val_set = GradePairs(val_photos, train=False, length=dc["val_samples"], **common)
-    train_loader = DataLoader(train_set, batch_size=dc["batch_size"], shuffle=True, drop_last=True,
+    sampler = None
+    if dc.get("person_boost", 1.0) != 1.0:
+        w = train_set.sample_weights(dc["person_boost"])
+        sampler = torch.utils.data.WeightedRandomSampler(w, num_samples=len(train_set), replacement=True)
+        share = float(w[w > 1].sum() / w.sum())
+        print(f"person oversampling x{dc['person_boost']}: {share:.0%} of samples have a person", flush=True)
+    train_loader = DataLoader(train_set, batch_size=dc["batch_size"], shuffle=sampler is None, sampler=sampler,
+                              drop_last=True,
                               num_workers=dc["workers"], pin_memory=True, persistent_workers=True,
                               worker_init_fn=worker_init, prefetch_factor=4)
     val_loader = DataLoader(val_set, batch_size=50, num_workers=8)
@@ -136,13 +148,28 @@ def main() -> None:
     print(f"{sum(p.numel() for p in model.parameters()) / 1e6:.2f}M params, {len(STYLES)} styles, "
           f"{len(train_photos)} train / {len(val_photos)} val photos, {len(train_loader)} it/epoch", flush=True)
 
-    best, step = float("-inf"), 0
-    for epoch in range(1, tc["epochs"] + 1):
+    best, step, start = float("-inf"), 0, 1
+    if args.init:
+        model.load_state_dict(torch.load(args.init, map_location="cpu")["model"])
+        print(f"initialized from {args.init}", flush=True)
+    if args.resume:
+        ck = torch.load(args.resume, map_location="cpu")
+        model.load_state_dict(ck["model"])
+        best, start = ck["psnr"], ck["epoch"] + 1
+        for _ in range(ck["epoch"] * len(train_loader)):
+            sched.step()
+        step = ck["epoch"] * len(train_loader)
+        print(f"resumed from {args.resume} (epoch {ck['epoch']}, val psnr {best:.2f})", flush=True)
+    for epoch in range(start, tc["epochs"] + 1):
         t0, running = time.time(), 0.0
         for batch in train_loader:
-            _, inp, tgt, style = build(batch, device, recipes, bank)
+            weights = {"w_person": tc["w_person"], "w_skin": tc["w_skin"]} if "w_person" in tc else None
+            _, inp, tgt, style, w = build(batch, device, recipes, bank, weights)
             out, lut, grid = predict(model, inp, style, device)
-            l1 = F.l1_loss(out, tgt)
+            if w is None:
+                l1 = F.l1_loss(out, tgt)
+            else:
+                l1 = ((out - tgt).abs() * w).sum() / (w.sum() * out.shape[1])
             loss = (l1 + tc["lambda_smooth"] * lut_smoothness(model.luts.basis)
                     + tc["lambda_mono"] * lut_monotonicity(lut, own_channel_only=True))
             if grid is not None:

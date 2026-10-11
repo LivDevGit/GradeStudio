@@ -125,3 +125,38 @@ final class LocalGrader {
                        format: .RGBAf, colorSpace: nil)
     }
 }
+
+/// MatchNet-L: content-aware matching (sky to sky, skin to skin) of a photo
+/// to a reference, rendered like GradeNet-L. Bundle match_local_lut.mlmodelc
+/// (scripts/export_coreml.py --model match_local).
+///
+///   let edit = try LocalMatcher().predict(photo: photo, reference: ref)
+///   let out = try edit.render(CIImage(cgImage: photo), intensity: strength)
+final class LocalMatcher {
+    private let model: MLModel
+
+    init(computeUnits: MLComputeUnits = .all) throws {
+        guard let url = Bundle.main.url(forResource: "match_local_lut", withExtension: "mlmodelc") else {
+            throw NSError(domain: "GradeML", code: 13, userInfo: [NSLocalizedDescriptionKey: "match_local_lut.mlmodelc missing"])
+        }
+        let config = MLModelConfiguration()
+        config.computeUnits = computeUnits
+        model = try MLModel(contentsOf: url, configuration: config)
+    }
+
+    func predict(photo: CGImage, reference: CGImage) throws -> LocalEdit {
+        let opts: [MLFeatureValue.ImageOption: Any] = [.cropAndScale: VNImageCropAndScaleOption.scaleFill.rawValue]
+        func feature(_ img: CGImage) throws -> MLFeatureValue {
+            try MLFeatureValue(cgImage: img, pixelsWide: 256, pixelsHigh: 256,
+                               pixelFormatType: kCVPixelFormatType_32BGRA, options: opts)
+        }
+        let out = try model.prediction(from: try MLDictionaryFeatureProvider(dictionary: [
+            "content": try feature(photo), "reference": try feature(reference),
+        ]))
+        guard let luts = out.featureValue(for: "luts")?.multiArrayValue,
+              let grid = out.featureValue(for: "grid")?.multiArrayValue else {
+            throw NSError(domain: "GradeML", code: 2, userInfo: [NSLocalizedDescriptionKey: "missing luts/grid output"])
+        }
+        return LocalGrader.edit(luts: luts, grid: grid)
+    }
+}

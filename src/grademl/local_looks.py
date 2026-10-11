@@ -60,6 +60,7 @@ class Finish:
     background_ev: float = -0.15                          # calm the background (people only)
     background_sat: float = 0.92
     vignette: float = 0.25                                # EV at the corners
+    skin_hue: float = 0.25                                # pull of skin toward the skin line
 
 
 def _sky(ev=-0.25, hl=-0.1, c=0.1, sat=None, hue=None, temp=0.0, saturation=1.0) -> ProLook:
@@ -130,6 +131,8 @@ class FinishBank:
 
         self.sky, self.haze_amt, self.vignette = col("sky"), col("haze"), col("vignette")
         self.subject_strength, self.subject_ev = col("subject_strength"), col("subject_ev")
+        self.skin_hue = col("skin_hue")
+        self.mono = torch.tensor([float(s == "bw_toned") for s in styles], device=device)
 
 
 # ---------------------------------------------------------------- masks
@@ -147,17 +150,34 @@ def refine(mask: torch.Tensor, img: torch.Tensor, r: int = 4, eps: float = 1e-3)
     return torch.cat(out, 1).clamp(0, 1)
 
 
+def skin_likelihood(img: torch.Tensor) -> torch.Tensor:
+    """(B, 3, H, W) -> (B, 1, H, W) soft "skin colored" in [0, 1]: Lab hue
+    20..80 degrees, chroma 8..50, L* 20..95 (all skin tones), with soft edges."""
+    from .color import rgb_to_lab
+
+    lab = rgb_to_lab(img.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+    L, a, b = lab[:, :1], lab[:, 1:2], lab[:, 2:3]
+    c = torch.sqrt(a**2 + b**2)
+    h = torch.rad2deg(torch.atan2(b, a)) % 360
+
+    def band(x, lo, hi, soft):
+        return smoothstep(x, lo - soft, lo + soft) * (1 - smoothstep(x, hi - soft, hi + soft))
+
+    return band(h, 20, 80, 8) * band(c, 8, 50, 4) * band(L, 20, 95, 5)
+
+
 def region_masks(maps: torch.Tensor, img: torch.Tensor) -> dict[str, torch.Tensor]:
     """Scene maps (B, 6, H, W) in [0, 1] at the photo's size -> soft masks
-    (B, 1, H, W): sky, person, far (distant, not sky), and whether the photo
-    has a person at all (B,)."""
+    (B, 1, H, W): sky, person, skin (person and skin colored), far (distant,
+    not sky), and whether the photo has a person at all (B,)."""
     sky = smoothstep(maps[:, SKY:SKY + 1], 0.3, 0.7)
     person = smoothstep(maps[:, PERSON:PERSON + 1], 0.3, 0.7)
     sky, person = refine(torch.cat([sky, person], 1), img).split(1, 1)
     depth = maps[:, DEPTH:DEPTH + 1].clamp(0, 1)  # antialiased resizing can overshoot
     far = ((1 - depth) ** 1.5) * (1 - sky) * (1 - person)
     has_person = (person.mean((1, 2, 3)) > 0.03).float()
-    return {"sky": sky, "person": person, "far": far, "has_person": has_person}
+    skin = person * skin_likelihood(img)
+    return {"sky": sky, "person": person, "skin": skin, "far": far, "has_person": has_person}
 
 
 def vignette_map(b: int, h: int, w: int, device) -> torch.Tensor:
@@ -206,7 +226,11 @@ def finish(photo: torch.Tensor, look: torch.Tensor, style: torch.Tensor, maps: t
     soft_look = ident + s * (look - ident)
     graded = mix(graded, apply_lut(pre, soft_look), m["person"])
 
-    # 3. After the look: sky tint, aerial perspective, calmer background
+    # 3. Skin: whatever the look did, faces keep a natural skin tone.
+    graded = mix(graded, skin_finish(graded, photo, _bl(bank.skin_hue[style]), _bl(bank.mono[style])),
+                 m["skin"])
+
+    # 4. After the look: sky tint, aerial perspective, calmer background
     #    behind people, vignette held off the highlights.
     graded = mix(graded, apply_lut(graded, bank.sky_post[style]), m["sky"] * _bl(bank.sky[style]))
     graded = mix(graded, apply_lut(graded, bank.haze[style]), m["far"] * _bl(bank.haze_amt[style]))
@@ -217,10 +241,49 @@ def finish(photo: torch.Tensor, look: torch.Tensor, style: torch.Tensor, maps: t
     return gain(graded, -v * _bl(bank.vignette[style])).clamp(0, 1)
 
 
+SKIN_HUE = 55.0  # Lab hue of the "skin line" (degrees): where natural skin tones of every depth sit
+
+
+def skin_finish(graded: torch.Tensor, photo: torch.Tensor, hue_pull: torch.Tensor,
+                mono: torch.Tensor) -> torch.Tensor:
+    """What a retoucher does to skin after a grade, per pixel:
+      hue      halfway back from the graded hue to the photo's own skin hue
+               (the look still shows on skin, e.g. warmer for teal & orange),
+               then hue_pull of the rest of the way to the skin line: no
+               green, gray-orange or magenta faces
+      chroma   halfway back to the photo's (the look may move skin, not paint it)
+      light    +3 L* for every skin tone alike (light on the face; no tone is
+               treated as one to "correct")
+    mono (1 for B&W looks): keep the graded color (gray) and only add light.
+    """
+    from .color import lab_to_rgb, rgb_to_lab
+
+    g = rgb_to_lab(graded.permute(0, 2, 3, 1))
+    o = rgb_to_lab(photo.permute(0, 2, 3, 1))
+    hg, ho = torch.atan2(g[..., 2], g[..., 1]), torch.atan2(o[..., 2], o[..., 1])
+    target = torch.deg2rad(torch.tensor(SKIN_HUE, device=photo.device))
+    def toward(a, b, t):  # angle a moved t of the way to b, the short way round
+        return a + t * torch.atan2(torch.sin(b - a), torch.cos(b - a))
+
+    h = toward(hg, ho, 0.5)
+    h = toward(h, target, hue_pull.view(-1, 1, 1))
+    cg, co = g[..., 1:].norm(dim=-1), o[..., 1:].norm(dim=-1)
+    c = 0.5 * (cg + co)
+    L = g[..., 0] + 3.0
+    out = torch.stack([L, c * torch.cos(h), c * torch.sin(h)], -1)
+    m = mono.view(-1, 1, 1, 1)
+    out = torch.cat([out[..., :1], out[..., 1:] * (1 - m) + g[..., 1:] * m], -1)
+    return lab_to_rgb(out).permute(0, 3, 1, 2)
+
+
 # ---------------------------------------------------------------- local faults
 
 
-N_FAULT = 6  # sky_ev, ground_ev, subject_ev, grad_ev, grad_angle, grad_pos
+N_FAULT = 8  # sky_ev, ground_ev, subject_ev, grad_ev, grad_angle, grad_pos, subject cast a*, b*
+
+# Casts that land on people only: light bounced off foliage, open shade under
+# a blue sky, magenta from mixed artificial light, warm reflected light.
+SUBJECT_CASTS = ((-9.0, 4.0), (-2.0, -10.0), (9.0, -4.0), (4.0, 9.0))
 
 
 def random_local_fault(rng: random.Random, p: float = 0.6) -> torch.Tensor:
@@ -230,14 +293,20 @@ def random_local_fault(rng: random.Random, p: float = 0.6) -> torch.Tensor:
       ground_ev  everything but the sky darker
       subject_ev a backlit, underexposed subject
       grad_*     light falling off across the frame (a graduated imbalance)
+      cast       a color cast on the subject only (SUBJECT_CASTS, scaled)
     """
     if rng.random() > p:
         return torch.zeros(N_FAULT)
+    cast = (0.0, 0.0)
+    if rng.random() < 0.35:
+        a, b = rng.choice(SUBJECT_CASTS)
+        k = rng.uniform(0.5, 1.2)
+        cast = (a * k, b * k)
     sky = rng.uniform(0.2, 0.8) if rng.random() < 0.5 else 0.0
     ground = -rng.uniform(0.2, 0.6) if rng.random() < 0.4 else 0.0
     subject = -rng.uniform(0.3, 0.8) if rng.random() < 0.4 else 0.0
     grad = rng.choice([-1, 1]) * rng.uniform(0.25, 0.7) if rng.random() < 0.35 else 0.0
-    return torch.tensor([sky, ground, subject, grad, rng.uniform(0, 2 * math.pi), rng.uniform(-0.4, 0.4)])
+    return torch.tensor([sky, ground, subject, grad, rng.uniform(0, 2 * math.pi), rng.uniform(-0.4, 0.4), *cast])
 
 
 def apply_local_fault(photo: torch.Tensor, params: torch.Tensor, maps: torch.Tensor) -> torch.Tensor:
@@ -253,7 +322,15 @@ def apply_local_fault(photo: torch.Tensor, params: torch.Tensor, maps: torch.Ten
     grad = torch.sigmoid((proj - pos) / 0.25)[:, None]
     ev = (m["sky"] * _bl(params[:, 0]) + (1 - m["sky"]) * _bl(params[:, 1])
           + m["person"] * _bl(params[:, 2]) + grad * _bl(params[:, 3]))
-    return gain(photo, ev)
+    out = gain(photo, ev)
+    if params[:, 6:8].abs().any():
+        from .color import lab_to_rgb, rgb_to_lab
+
+        lab = rgb_to_lab(out.permute(0, 2, 3, 1))
+        shift = torch.cat([torch.zeros_like(params[:, :1]), params[:, 6:8]], 1).view(-1, 1, 1, 3)
+        cast = lab_to_rgb(lab + shift).permute(0, 3, 1, 2)
+        out = mix(out, cast, m["person"])
+    return out
 
 
 # ---------------------------------------------------------------- training data
@@ -276,7 +353,7 @@ class LocalGradePairs(torch.utils.data.Dataset):
 
     def __init__(self, images: list, maps_dir, train: bool = True, length: int | None = None,
                  render_size: int = 17, p_clean: float = 0.15, p_none: float = 0.25,
-                 p_local: float = 0.6, seed: int = 0):
+                 p_local: float = 0.6, p_person_crop: float = 0.0, seed: int = 0):
         from pathlib import Path
 
         self.maps_dir = Path(maps_dir)
@@ -285,6 +362,28 @@ class LocalGradePairs(torch.utils.data.Dataset):
         self.length = length or len(self.images)
         self.render_size, self.p_clean, self.p_none, self.p_local, self.seed = (
             render_size, p_clean, p_none, p_local, seed)
+        self.p_person_crop = p_person_crop
+        self.coverage = person_coverage(self.maps_dir, self.images)
+
+    def sample_weights(self, person_boost: float) -> torch.Tensor:
+        """Per-photo sampling weights: photos with a person (> 3% of the
+        frame) person_boost times as likely (people are ~10% of Unsplash)."""
+        return torch.tensor([person_boost if c > 0.03 else 1.0 for c in self.coverage])
+
+    def _person_box(self, maps: torch.Tensor, rng: random.Random):
+        """A crop (top, left, h, w) around the person (bounding box grown 1.3-2.2x), or None."""
+        ys, xs = torch.nonzero(maps[PERSON] > 0.5, as_tuple=True)
+        if len(ys) < 50:
+            return None
+        h, w = maps.shape[1:]
+        cy, cx = (ys.min() + ys.max()).item() / 2, (xs.min() + xs.max()).item() / 2
+        k = rng.uniform(1.3, 2.2)
+        bh = min(h, max(64, round((ys.max() - ys.min()).item() * k)))
+        bw = min(w, max(64, round((xs.max() - xs.min()).item() * k)))
+        bh, bw = min(h, max(bh, round(0.75 * bw))), min(w, max(bw, round(0.75 * bh)))  # aspect 3:4..4:3
+        t = int(min(max(cy - bh / 2, 0), h - bh))
+        l = int(min(max(cx - bw / 2, 0), w - bw))
+        return t, l, bh, bw
 
     def __len__(self) -> int:
         return self.length
@@ -298,7 +397,10 @@ class LocalGradePairs(torch.utils.data.Dataset):
         img = load_rgb(path)
         maps = load_maps(self.maps_dir / f"{path.stem}.npz", img.shape[1:])
         if self.train:
-            t, l, h, w = random_crop_box(*img.shape[1:])
+            box = None
+            if self.coverage[i % len(self.images)] > 0.03 and rng.random() < self.p_person_crop:
+                box = self._person_box(maps, rng)
+            t, l, h, w = box or random_crop_box(*img.shape[1:])
             img, maps = img[:, t:t + h, l:l + w], maps[:, t:t + h, l:l + w]
             if rng.random() < 0.5:
                 img, maps = img.flip(-1), maps.flip(-1)
@@ -307,6 +409,35 @@ class LocalGradePairs(torch.utils.data.Dataset):
         local = torch.zeros(N_FAULT) if clean else random_local_fault(rng, self.p_local)
         style = 0 if rng.random() < self.p_none else rng.randrange(1, len(STYLES))
         return resize(img), resize(maps), fault, local, style
+
+
+def person_coverage(maps_dir, images: list) -> list[float]:
+    """Share of each photo covered by a person (scene map > 0.5), cached in
+    maps_dir/person_coverage.json."""
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    import numpy as np
+
+    cache = maps_dir / "person_coverage.json"
+    known = json.loads(cache.read_text()) if cache.exists() else {}
+    missing = [p for p in images if p.stem not in known]
+    if missing:
+        def cov(p):
+            return p.stem, float((np.load(maps_dir / f"{p.stem}.npz")["maps"][PERSON] > 127).mean())
+
+        with ThreadPoolExecutor(16) as ex:
+            known.update(dict(ex.map(cov, missing)))
+        cache.write_text(json.dumps(known))
+    return [known[p.stem] for p in images]
+
+
+def loss_weights(maps: torch.Tensor, photo: torch.Tensor, w_person: float = 3.0,
+                 w_skin: float = 2.0) -> torch.Tensor:
+    """(B, 1, H, W) per-pixel loss weights: people and their skin count more
+    (they cover few pixels but are what viewers look at first)."""
+    m = region_masks(maps, photo)
+    return 1 + w_person * m["person"] + w_skin * m["skin"]
 
 
 def make_local_batch(photo, maps, fault, local, style, recipes, bank: FinishBank):

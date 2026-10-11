@@ -198,3 +198,86 @@ def slice_packed(packed: torch.Tensor, img: torch.Tensor, g: int) -> torch.Tenso
     lo = bilinear(x + z0 * gw, y)
     hi = bilinear(x + (z0 + 1) * gw, y)
     return (lo * (1 - fz) + hi * fz).softmax(0)
+
+
+# ---------------------------------------------------------------- reference matching
+
+
+class MatchLocalNet(nn.Module):
+    """(photo, reference) -> K LUTs + bilateral grid: content-aware matching
+    on device, distilled from grademl.semantic_match (DINOv2 + per-region
+    transfer) into one small network.
+
+    Both images go through the same conv stem to a 16x16 feature map. Every
+    photo cell then attends to the reference cells (cross-attention, keys
+    from reference features, values = reference features + the cell's mean
+    color and color spread), so each part of the photo gathers the colors of
+    the parts of the reference that look like it: sky reads the reference's
+    sky, skin its skin. The attended context feeds the grid (where to apply
+    which LUT) and, pooled together with both images' color statistics, the
+    LUT weights (what the K LUTs do). Plain matmul / softmax: converts to
+    Core ML like the rest.
+    """
+
+    def __init__(self, k: int = 4, n_luts: int = 32, lut_size: int = DEFAULT_SIZE, width: int = 24,
+                 hidden: int = 640, bins3d: int = 8, grid_bins: int = 8, attn_dim: int = 96):
+        super().__init__()
+        w = width
+        self.k, self.n, self.grid_bins = k, n_luts, grid_bins
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, w, 3, stride=2, padding=1), nn.LeakyReLU(0.2),
+            *_conv(w, 2 * w, 2), *_conv(2 * w, 4 * w, 2), *_conv(4 * w, 8 * w, 2),
+        )
+        c16 = 8 * w
+        self.local = nn.Sequential(*_conv(c16, c16), *_conv(c16, c16))
+        self.down = nn.Sequential(*_conv(c16, c16, 2), *_conv(c16, c16, 2))
+        self.stats = ColorStats(bins3d=bins3d)
+        # Cell colors: mean and std of RGB in each 16x16 cell (instance norm in
+        # the stem removes exactly this information).
+        self.q = nn.Conv2d(c16 + 6, attn_dim, 1)
+        self.kk = nn.Conv2d(c16 + 6, attn_dim, 1)
+        self.v = nn.Conv2d(c16 + 6, c16, 1)
+        self.scale = attn_dim ** -0.5
+        d = 2 * (c16 + self.stats.out_dim) + c16
+        self.mlp = nn.Sequential(
+            nn.Linear(d, hidden), nn.LeakyReLU(0.2),
+            nn.Linear(hidden, hidden), nn.LeakyReLU(0.2), nn.Dropout(0.1),
+        )
+        self.lut_head = nn.Linear(hidden, k * n_luts)
+        nn.init.zeros_(self.lut_head.bias)
+        self.fuse = nn.Linear(hidden, c16)
+        self.grid_head = nn.Sequential(
+            nn.Conv2d(2 * c16 + 6, c16, 3, padding=1), nn.LeakyReLU(0.2),
+            nn.Conv2d(c16, k * grid_bins, 1),
+        )
+        nn.init.zeros_(self.grid_head[-1].weight)
+        nn.init.zeros_(self.grid_head[-1].bias)
+        self.luts = LUTBank(n_luts, lut_size)
+
+    @staticmethod
+    def cell_colors(img: torch.Tensor) -> torch.Tensor:
+        """(B, 3, 256, 256) -> (B, 6, 16, 16): mean and std of each 16x16 cell."""
+        m = F.avg_pool2d(img, 16)
+        sq = F.avg_pool2d(img * img, 16)
+        return torch.cat([m, (sq - m * m).clamp_min(1e-6).sqrt() * 4], 1)
+
+    def forward(self, photo: torch.Tensor, reference: torch.Tensor, flat: bool = False):
+        b = photo.shape[0]
+        fp, fr = self.stem(photo), self.stem(reference)                  # (B, C, 16, 16)
+        cp, cr = self.cell_colors(photo), self.cell_colors(reference)
+        xp, xr = torch.cat([fp, cp], 1), torch.cat([fr, cr], 1)
+        q = self.q(xp).flatten(2).transpose(1, 2)                        # (B, 256, a)
+        kk = self.kk(xr).flatten(2)                                      # (B, a, 256)
+        v = self.v(xr).flatten(2).transpose(1, 2)                        # (B, 256, C)
+        attn = (q @ kk * self.scale).softmax(-1)
+        ctx = (attn @ v).transpose(1, 2).reshape(b, -1, *fp.shape[-2:])  # (B, C, 16, 16)
+
+        g = torch.cat([self.down(fp).mean(dim=(2, 3)), self.stats(photo),
+                       self.down(fr).mean(dim=(2, 3)), self.stats(reference), ctx.mean(dim=(2, 3))], 1)
+        h = self.mlp(g)
+        luts = self.luts(self.lut_head(h).reshape(-1, self.n))
+        if not flat:
+            luts = luts.reshape(b, self.k, *luts.shape[1:])
+        loc = torch.cat([self.local(fp) + self.fuse(h)[:, :, None, None], ctx, cp], 1)
+        grid = self.grid_head(F.leaky_relu(loc, 0.2))
+        return luts, grid.reshape(b, self.k, self.grid_bins, *grid.shape[-2:])

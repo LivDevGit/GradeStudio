@@ -62,6 +62,31 @@ is shared (`grademl.compose`, defaults in `manifest.json` "subject_aware").
 Expose the three settings as sliders: look on the person (0.75), look on
 the background (1.0), background pop (0.6).
 
+### Local edits: GradeNet-L and MatchNet-L
+
+Both output `luts` `(K, 3, 33, 33, 33)` (K = 4) and `grid`
+`(1, K, 8, 16, 16)`: a bilateral grid of logits over (luma, y, x). The
+edit is
+
+```
+weights(x, y) = softmax_k(grid sampled at (x, y, luma of the pixel))
+out(x, y)     = sum_k weights_k * LUT_k(pixel)      (on sRGB-encoded values)
+```
+
+so the sky, the subject and the background take different LUTs, with edges
+that follow the photo's own luminance edges; no segmentation runs on device.
+`LocalGrader.predict(photo, style:)` / `LocalMatcher.predict(photo:reference:)`
+return a `LocalEdit`; `edit.render(fullResCIImage, intensity:)` runs the K
+`CIColorCube` passes and the `localBlend` kernel (`LocalGrade.ci.metal`,
+build flags in its header). The grid travels to the kernel as a float RGBA
+image, luma slices side by side (`LocalGrader.pack`, mirroring
+`grademl.local.pack_grid`; the slicing math is `grademl.local.slice_packed`,
+tested against training in `tests/test_local.py`).
+
+For the editor's top 3 on GradeNet-L, port `grademl.editor.local_top_versions`
+(same scoring as `Editor.topVersions`, candidates are image blends between
+the "none" edit and each style's edit).
+
 ## Verification checklist (Mac / iPhone)
 
 1. **Parity**: copy `exports/match_lut.mlpackage` and
@@ -98,6 +123,13 @@ the background (1.0), background pop (0.6).
 7. **Grain**: `Grain.apply` at amount 0.06, size 1.2 next to
    `grademl.grain.add_grain` with the same settings; the noise differs,
    strength and clump size should look the same.
+
+8. **Local blend kernel**: compile `LocalGrade.ci.metal` with the CI
+   flags, run `LocalGrader` on a test photo and compare with
+   `grademl.editor.local_edit(...).render(img)` on the same photo (PSNR
+   > 40 dB expected away from fp16 noise). If the edit looks flipped
+   top-to-bottom (sky treatment on the ground), the grid row order in
+   `LocalGrader.pack` is the culprit: flip `y`.
 
 ## Keeping Python and Swift in sync
 

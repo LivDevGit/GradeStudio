@@ -45,3 +45,17 @@ def test_packed_grid_matches_slicing():
         got = slice_packed(pack_grid(grid[0]), img[0], 8)
         assert torch.allclose(got[:k], ref, atol=1e-4)
         assert k == 4 or got[k:].abs().max() < 1e-6
+
+
+def test_match_net_shapes_identity_and_reference_dependence():
+    from grademl.local import MatchLocalNet
+    net = MatchLocalNet(k=3, n_luts=8, lut_size=17, width=8, hidden=64).eval()
+    p, r = torch.rand(2, 3, 256, 256), torch.rand(2, 3, 256, 256)
+    with torch.no_grad():
+        luts, grid = net(p, r)
+        assert luts.shape == (2, 3, 3, 17, 17, 17) and grid.shape == (2, 3, 8, 16, 16)
+        assert torch.allclose(luts, identity_lut(17).expand_as(luts), atol=1e-6)
+        net.luts.basis.normal_(std=0.05)
+        a = net(p, r)[0]
+        b = net(p, r.flip(1))[0]
+    assert (a - b).abs().max() > 1e-4

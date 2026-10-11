@@ -82,9 +82,11 @@ def local_edit(net: LocalGradeNet, img: torch.Tensor, style: str, intensity: flo
 
 @torch.no_grad()
 def local_top_versions(img: torch.Tensor, net: LocalGradeNet, mask: torch.Tensor | None = None, n: int = 3,
-                       intensities: tuple[float, ...] = (0.7, 1.0, 1.25),
+                       intensities: tuple[float, ...] = (0.6, 0.85, 1.0),
                        w: EditorWeights = EditorWeights()) -> list[LocalEdit]:
-    """The editor's n best edits of img ((3, H, W) in [0, 1]), one per style."""
+    """The editor's n best edits of img ((3, H, W) in [0, 1]), one per style. Intensities stop
+    at 1: a GradeNet-L edit at 1 is the look as designed, finishing included; past it the
+    "bold" bonus rewarded exaggeration (on real photos the v1 editor picked 125% most of the time)."""
     dev = next(net.parameters()).device
     small = resize(img.to(dev))[None]
     names = ["none", *DIRECTIONS]

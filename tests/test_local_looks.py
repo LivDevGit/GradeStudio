@@ -54,3 +54,41 @@ def test_masks_handle_depth_overshoot():
     m = _maps(depth=1.02)  # antialiased resize can overshoot 1
     masks = region_masks(m, torch.rand(1, 3, 32, 32))
     assert all(torch.isfinite(v).all() for v in masks.values())
+
+
+def test_skin_finish_pulls_a_green_face_back_and_keeps_bw_gray():
+    from grademl.color import rgb_to_lab
+    from grademl.local_looks import skin_finish
+    photo = torch.tensor([0.80, 0.62, 0.52]).view(1, 3, 1, 1).expand(1, 3, 4, 4).contiguous()  # skin
+    green = torch.tensor([0.62, 0.70, 0.50]).view(1, 3, 1, 1).expand(1, 3, 4, 4).contiguous()  # graded green
+    out = skin_finish(green, photo, torch.tensor([0.25]), torch.tensor([0.0]))
+
+    def hue(x):
+        lab = rgb_to_lab(x[0, :, 0, 0])
+        return torch.rad2deg(torch.atan2(lab[2], lab[1])).item()
+    assert abs(hue(out) - hue(photo)) < abs(hue(green) - hue(photo)) / 2 + 1
+    gray = torch.full((1, 3, 4, 4), 0.5)
+    out = skin_finish(gray, photo, torch.tensor([0.25]), torch.tensor([1.0]))
+    assert (out[0, 0] - out[0, 1]).abs().max() < 0.01  # B&W stays gray, only lighter
+    assert out.mean() > 0.5
+
+
+def test_subject_cast_only_on_the_person():
+    m = torch.zeros(1, 6, 32, 32)
+    m[:, 1, 8:24, 8:24] = 1.0
+    photo = torch.full((1, 3, 32, 32), 0.5)
+    p = torch.zeros(1, N_FAULT)
+    p[0, 6:8] = torch.tensor([-9.0, 4.0])  # green bounce
+    out = apply_local_fault(photo, p, m)
+    assert out[0, 1, 16, 16] > out[0, 0, 16, 16] + 0.02       # person: green
+    assert (out[0, :, 0, 0] - 0.5).abs().max() < 0.01           # background untouched
+
+
+def test_person_crop_contains_the_person():
+    from grademl.local_looks import LocalGradePairs
+    ds = LocalGradePairs.__new__(LocalGradePairs)
+    maps = torch.zeros(6, 300, 400)
+    maps[1, 100:200, 250:300] = 1.0
+    t, l, h, w = ds._person_box(maps, random.Random(0))
+    assert t <= 100 and t + h >= 200 and l <= 250 and l + w >= 300
+    assert 0.74 <= h / w <= 1.34
