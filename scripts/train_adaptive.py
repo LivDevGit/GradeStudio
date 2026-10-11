@@ -20,6 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 
 from grademl.data import FiveKPairs
+from grademl.local import LocalGradeNet, apply_local, grid_tv
 from grademl.lut import apply_lut, lut_monotonicity, lut_smoothness
 from grademl.metrics import delta_e76, psnr
 from grademl.model import AdaptiveLUTNet
@@ -28,15 +29,25 @@ from grademl.utils import seed_everything, worker_init
 REPO = Path(__file__).resolve().parents[1]
 
 
+def run(model, net_in, img):
+    """Grade img (any resolution) with the prediction from net_in (256px).
+    Returns (output, LUTs for the regularizers, weight grid or None)."""
+    if isinstance(model, LocalGradeNet):
+        luts, grid = model(net_in)
+        return apply_local(img, luts, grid), luts, grid
+    lut = model(net_in)
+    return apply_lut(img, lut), lut, None
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, n_samples: int = 4):
-    """Predict the LUT from the 256px input, apply it at full resolution."""
+    """Predict the LUT(s) from the 256px input, apply at full resolution."""
     model.eval()
     scores = {"psnr": [], "delta_e": [], "psnr_identity": []}
     samples = []
     for i, (net_in, inp, tgt) in enumerate(loader):
         net_in, inp, tgt = net_in.to(device), inp.to(device), tgt.to(device)
-        out = apply_lut(inp, model(net_in))
+        out = run(model, net_in, inp)[0]
         scores["psnr"].append(psnr(out, tgt).item())
         scores["delta_e"].append(delta_e76(out, tgt).item())
         scores["psnr_identity"].append(psnr(inp, tgt).item())
@@ -77,7 +88,8 @@ def main() -> None:
                               worker_init_fn=worker_init)
     test_loader = DataLoader(test_set, batch_size=1, num_workers=4)
 
-    model = AdaptiveLUTNet(**cfg["model"]).to(device)
+    arch = cfg.get("arch", "global")
+    model = (LocalGradeNet(**cfg["model"]) if arch == "local" else AdaptiveLUTNet(**cfg["model"])).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=tc["epochs"] * len(train_loader))
     print(f"{sum(p.numel() for p in model.parameters()) / 1e3:.0f}K params, "
@@ -88,14 +100,15 @@ def main() -> None:
         t0, running = time.time(), 0.0
         for inp, tgt in train_loader:
             inp, tgt = inp.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
-            lut = model(inp)
-            out = apply_lut(inp, lut)
+            out, lut, grid = run(model, inp, inp)
             mse = F.mse_loss(out, tgt)
             # Smoothness on the residual bases; monotonicity on the predicted
             # LUT (identity + residuals): a residual basis may legitimately
             # decrease, only the final mapping must not.
             loss = (mse + tc["lambda_smooth"] * lut_smoothness(model.luts.basis)
                     + tc["lambda_mono"] * lut_monotonicity(lut))
+            if grid is not None:
+                loss = loss + tc.get("lambda_grid", 1e-3) * grid_tv(grid)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -118,7 +131,7 @@ def main() -> None:
             writer.add_image("test/input_pred_target", grid, epoch)
             msg += (f"  | test psnr {scores['psnr']:.2f} dE {scores['delta_e']:.2f}"
                     f" (identity {scores['psnr_identity']:.2f})")
-            ckpt = {"model": model.state_dict(), "cfg": cfg, "epoch": epoch, **scores}
+            ckpt = {"model": model.state_dict(), "cfg": cfg, "epoch": epoch, "arch": arch, **scores}
             torch.save(ckpt, run_dir / "last.pt")
             if scores["psnr"] > best:
                 best = scores["psnr"]

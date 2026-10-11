@@ -10,3 +10,6 @@ gradio
 coremltools==9.0
 huggingface_hub
 pytest
+transformers   # scene labels (OneFormer, Depth Anything) and DINOv2 for semantic matching
+scipy
+scikit-learn

@@ -1,0 +1,29 @@
+# Stage 1 with local grading (grademl.local): K LUTs blended per pixel by a
+# bilateral grid, on FiveK input -> Expert C (real human retouches, which
+# include local adjustments). Research-only data: validates the architecture.
+name: local_fivek
+seed: 0
+arch: local
+
+model:
+  k: 4
+  n_luts: 24
+  lut_size: 33
+  width: 24
+  hidden: 512
+  bins3d: 8
+  grid_bins: 8
+
+data:
+  target: expertC
+  batch_size: 16
+  workers: 8
+
+train:
+  epochs: 100
+  lr: 3.0e-4
+  weight_decay: 0.0
+  lambda_smooth: 1.0e-4
+  lambda_mono: 10.0
+  lambda_grid: 1.0e-3
+  eval_every: 5

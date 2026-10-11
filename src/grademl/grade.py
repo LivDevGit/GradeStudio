@@ -123,22 +123,28 @@ def clipped(x: torch.Tensor) -> torch.Tensor:
     return ((x.amin(1) > 0.97) | (x.amax(1) < 0.02)).float().mean((1, 2))
 
 
+def backed_off_looks(photo: torch.Tensor, style: torch.Tensor, recipes: torch.Tensor,
+                     max_extra_clip: float = 0.03, backoff: float = 0.65) -> torch.Tensor:
+    """(B, 3, D, D, D) look LUT per photo: the recipe, or the recipe at
+    `backoff` strength where the full direction clips more than
+    max_extra_clip of this photo (the net learns to hold back on photos that
+    cannot take the full look)."""
+    look = recipes[style]
+    soft = (clipped(apply_lut(photo, look)) - clipped(photo)) > max_extra_clip
+    if soft.any():
+        ident = identity_lut(recipes.shape[-1], device=photo.device)
+        look = torch.where(soft[:, None, None, None, None], ident + backoff * (look - ident), look)
+    return look
+
+
 def make_grade_batch(photo: torch.Tensor, fault: torch.Tensor, style: torch.Tensor, recipes: torch.Tensor,
                      max_extra_clip: float = 0.03, backoff: float = 0.65):
-    """(input, target) on the GPU. Where the full direction clips more than
-    max_extra_clip of this photo, the target uses it at `backoff` strength:
-    the net learns to hold back on photos that cannot take the full look."""
+    """(input, target) on the GPU: the faulty photo, and the finished photo
+    graded in the style (backed off where it would clip, backed_off_looks)."""
     size = recipes.shape[-1]
     fault = F.interpolate(fault, size=(size,) * 3, mode="trilinear", align_corners=True)
     inp = apply_lut(photo, fault).clamp(0, 1)
-    look = recipes[style]
-    graded = apply_lut(photo, look)
-    soft = (clipped(graded) - clipped(photo)) > max_extra_clip
-    if soft.any():
-        ident = identity_lut(size, device=photo.device)
-        look = torch.where(soft[:, None, None, None, None], ident + backoff * (look - ident), look)
-        graded = apply_lut(photo, look)
-    return inp, graded
+    return inp, apply_lut(photo, backed_off_looks(photo, style, recipes, max_extra_clip, backoff))
 
 
 # ---------------------------------------------------------------- inference

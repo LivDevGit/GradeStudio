@@ -1,0 +1,37 @@
+# GradeNet-L: per-photo correction + grading with local finishing
+# (grademl.local, grademl.local_looks). Unsplash only, so the model can ship.
+# Targets: global look + sky / subject / depth / vignette work; inputs also
+# carry local exposure faults (bright sky, backlit subject, graduated).
+name: grade_local_v1
+seed: 0
+arch: local
+
+model:
+  k: 4
+  n_luts: 32
+  lut_size: 33
+  width: 24
+  hidden: 640
+  bins3d: 8
+  grid_bins: 8
+
+data:
+  images: unsplash/images_384   # relative to $GRADEML_DATA
+  maps: unsplash/scene_192      # scripts/label_scenes.py
+  val_every_nth: 50             # same held-out photos as grade_v1
+  val_samples: 1500
+  p_clean: 0.15
+  p_none: 0.25
+  p_local: 0.6
+  batch_size: 32
+  workers: 12
+
+train:
+  epochs: 40
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 500
+  lambda_smooth: 1.0e-4
+  lambda_mono: 1.0
+  lambda_grid: 1.0e-3
+  eval_every: 2

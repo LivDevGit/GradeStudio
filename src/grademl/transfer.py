@@ -130,17 +130,26 @@ def transfer_lut(content: torch.Tensor, reference: torch.Tensor, size: int = DEF
                 (a*b* units) per band
       spread:   fraction of the chroma (saturation / hue spread) transform
     """
-    b = content.shape[0]
-    lab_c, lab_r = _pixels_lab(content), _pixels_lab(reference)
+    return transfer_lut_lab(_pixels_lab(content), _pixels_lab(reference), size, tone, tint, max_tint, spread)
+
+
+@torch.no_grad()
+def transfer_lut_lab(lab_c: torch.Tensor, lab_r: torch.Tensor, size: int = DEFAULT_SIZE,
+                     tone: float = 0.6, tint: float = 0.6, max_tint: float = 15.0,
+                     spread: float = 0.7) -> torch.Tensor:
+    """transfer_lut on Lab pixel samples (B, N, 3) and (B, M, 3) instead of
+    images, e.g. the pixels of one region and of its counterpart in the
+    reference (grademl.semantic_match)."""
+    b = lab_c.shape[0]
     curve = luminance_curve(lab_c[..., 0], lab_r[..., 0])          # (B, L_BINS)
     mc, mr, t = chroma_map(lab_c, lab_r)
     shift = (mr - mc) * tint                                        # (B, bands, 2)
     norm = shift.norm(dim=-1, keepdim=True)
     shift = shift * (max_tint / norm.clamp_min(max_tint))           # cap the magnitude
-    eye = torch.eye(2, device=content.device)
+    eye = torch.eye(2, device=lab_c.device)
     t = eye + spread * (t - eye)
 
-    grid = identity_lut(size, device=content.device).reshape(3, -1).T   # (N, 3) RGB
+    grid = identity_lut(size, device=lab_c.device).reshape(3, -1).T   # (N, 3) RGB
     lab = rgb_to_lab(grid).expand(b, -1, -1)                            # (B, N, 3)
     l_in = lab[..., 0]
     # Piecewise-linear lookup of the luminance curve.
