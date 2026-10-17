@@ -96,7 +96,8 @@ The critic and boldness terms are **calibrated per look** against their average 
 **MatchNet-L** (`grademl.local.MatchLocalNet`) distills this into a phone-sized network:
 
 - Both images go through a shared conv stem. Each photo cell **cross-attends** to the reference cells (features + cell colors), and the result drives the same LUTs-plus-grid output as GradeNet-L.
-- It is **residual on the global color transfer**, so it only has to learn the region-by-region part.
+- It is **residual on the global color transfer** (`grademl.transfer.transfer_lut`, a short analytic
+  algorithm the app computes before running the network), so it only has to learn the region-by-region part.
 - Training uses 49k pairs: mostly content neighbours by DINOv2 similarity, with the reference pushed through a random pro look. The teacher outputs are precomputed (`scripts/make_match_pairs.py`).
 
 ![Reference matching](docs/images/match.jpg)
