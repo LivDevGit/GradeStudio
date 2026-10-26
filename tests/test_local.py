@@ -1,6 +1,6 @@
 import torch
 
-from grademl.local import LocalGradeNet, apply_local, blend_weights, slice_grid
+from grademl.local import LocalGradeNet, _pairs, apply_local, blend_weights, halo, random_shifts, slice_grid
 from grademl.lut import identity_lut
 
 
@@ -59,3 +59,28 @@ def test_match_net_shapes_identity_and_reference_dependence():
         a = net(p, r)[0]
         b = net(p, r.flip(1))[0]
     assert (a - b).abs().max() > 1e-4
+
+
+def test_pairs_are_aligned():
+    x = torch.arange(30.).view(1, 1, 5, 6)
+    for dy, dx in [(2, 0), (0, -3), (-1, 2), (3, 3)]:
+        a, b = _pairs(x, dy, dx)
+        assert a.shape == b.shape
+        assert torch.equal(b - a, torch.full_like(a, dy * 6 + dx))
+
+
+def test_halo_flags_position_switches_not_edges():
+    # A flat sky: graded alike everywhere -> no halo; graded differently on
+    # the left half (a position switch, as around a tree) -> halo.
+    sky = torch.full((1, 3, 64, 64), 0.7)
+    assert float(halo(sky, sky * 0.9)) < 1e-6
+    split = sky.clone()
+    split[..., :32] *= 0.8
+    assert float(halo(sky, split)) > 1e-3
+    # The same switch along a real edge (different input colors) is fine,
+    # and so is anything the target does too.
+    edge = sky.clone()
+    edge[..., :32] = 0.1
+    assert float(halo(edge, edge * torch.where(torch.arange(64) < 32, 0.8, 1.0))) < 1e-6
+    assert float(halo(sky, split, split)) < 1e-6
+    assert all(2 <= (dy * dy + dx * dx) ** 0.5 <= 25 for dy, dx in random_shifts(16))

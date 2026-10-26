@@ -12,7 +12,7 @@ iOS port matches the golden outputs in `golden/`.
 ## Kit contents
 
 ```
-models/grade_local_lut.mlpackage      GradeNet-L v4 (the AI editor), 13 MB fp16
+models/grade_local_lut.mlpackage      GradeNet-L v5 (the AI editor, no halos), 13 MB fp16
 models/grade_local_lut.styles.json    style one-hot order: "none", then 14 looks
 models/match_local_lut.mlpackage      MatchNet-L v2 (content-aware match, residual), 15 MB
 models/match_lut.mlpackage            match model v6 (look / match heads; existing feature)

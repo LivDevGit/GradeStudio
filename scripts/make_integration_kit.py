@@ -85,7 +85,7 @@ def main() -> None:
     shutil.copy(REPO / "docs/ios_integration.md", out)
     shutil.copy(REPO / "scripts/check_coreml_parity.py", out)
 
-    gl = load("runs/grade_local_v4/best.pt", LocalGradeNet, dev, cond_dim=len(STYLES))
+    gl = load("runs/grade_local_v5/best.pt", LocalGradeNet, dev, cond_dim=len(STYLES))
     ml = load("runs/match_local_v2/best.pt", MatchLocalNet, dev)
     summary = {"grade": {}, "match": {}}
 

@@ -24,7 +24,7 @@ from torchvision.utils import make_grid
 
 from grademl.data import data_root
 from grademl.grade import STYLES, GradePairs, make_grade_batch, recipe_luts, style_onehot
-from grademl.local import LocalGradeNet, apply_local, grid_tv
+from grademl.local import LocalGradeNet, apply_local, grid_tv, halo, random_shifts
 from grademl.local_looks import FinishBank, LocalGradePairs, loss_weights, make_local_batch
 from grademl.lut import apply_lut, lut_monotonicity, lut_smoothness
 from grademl.metrics import delta_e76, psnr
@@ -58,7 +58,7 @@ def predict(model, inp, style, device):
 @torch.no_grad()
 def evaluate(model, loader, device, recipes, bank=None, n_samples: int = 8):
     model.eval()
-    scores = {k: [] for k in ["psnr", "delta_e", "psnr_none", "psnr_styled", "preset_styled", "no_op"]}
+    scores = {k: [] for k in ["psnr", "delta_e", "psnr_none", "psnr_styled", "preset_styled", "no_op", "halo"]}
     samples = []
     for batch in loader:
         photo, inp, tgt, style, _ = build(batch, device, recipes, bank)
@@ -70,6 +70,8 @@ def evaluate(model, loader, device, recipes, bank=None, n_samples: int = 8):
         styled = (style > 0) & faulty
         scores["psnr"] += p.tolist()
         scores["delta_e"] += delta_e76(out, tgt).tolist()
+        if isinstance(model, LocalGradeNet):  # x100: % of the 0..1 range
+            scores["halo"] += (halo(inp, out.clamp(0, 1), tgt) * 100).tolist()
         scores["psnr_none"] += p[(style == 0) & faulty].tolist()
         scores["psnr_styled"] += p[styled].tolist()
         # A fixed filter: the recipe applied to the faulty photo as it is.
@@ -90,6 +92,7 @@ def main() -> None:
     ap.add_argument("--init", type=Path, help="start from these weights (fine-tune; fresh LR schedule)")
     ap.add_argument("--resume", type=Path, help="continue from a checkpoint (weights; the LR schedule is "
                     "fast-forwarded to its epoch, optimizer moments start fresh)")
+    ap.add_argument("--eval-only", action="store_true", help="evaluate the --init weights and exit")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(args.config.read_text())
@@ -172,6 +175,10 @@ def main() -> None:
     if args.init:
         model.load_state_dict(torch.load(args.init, map_location="cpu")["model"])
         print(f"initialized from {args.init}", flush=True)
+        if args.eval_only:
+            scores, _ = evaluate(model, val_loader, device, recipes, bank)
+            print("  ".join(f"{k} {v:.3f}" for k, v in scores.items()), flush=True)
+            return
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu")
         model.load_state_dict(ck["model"])
@@ -194,6 +201,8 @@ def main() -> None:
                     + tc["lambda_mono"] * lut_monotonicity(lut, own_channel_only=True))
             if grid is not None:
                 loss = loss + tc.get("lambda_grid", 1e-3) * grid_tv(grid)
+                if tc.get("lambda_halo"):
+                    loss = loss + tc["lambda_halo"] * halo(inp, out, tgt, random_shifts()).mean()
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -213,7 +222,8 @@ def main() -> None:
             writer.add_image("val/input_pred_target", grid, epoch)
             msg += (f"  | val psnr {scores['psnr']:.2f} dE {scores['delta_e']:.2f}  "
                     f"styled {scores['psnr_styled']:.2f} (fixed preset {scores['preset_styled']:.2f})  "
-                    f"correction {scores['psnr_none']:.2f}  (no-op {scores['no_op']:.2f})")
+                    f"correction {scores['psnr_none']:.2f}  (no-op {scores['no_op']:.2f})"
+                    + (f"  halo {scores['halo']:.3f}" if "halo" in scores else ""))
             ckpt = {"model": model.state_dict(), "cfg": cfg, "epoch": epoch,
                     "arch": "grade_local" if arch == "local" else "grade",
                     "styles": list(STYLES), **scores}

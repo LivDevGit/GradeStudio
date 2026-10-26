@@ -85,6 +85,48 @@ def grid_tv(grid: torch.Tensor) -> torch.Tensor:
     return sum(grid.diff(dim=d).pow(2).mean() for d in (-3, -2, -1))
 
 
+HALO_SHIFTS = ((0, 6), (6, 0), (0, 12), (12, 0), (9, 9), (9, -9), (0, 20), (20, 0))
+
+
+def _pairs(x: torch.Tensor, dy: int, dx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """x and x shifted by (dy, dx), cropped to where both exist."""
+    h, w = x.shape[-2:]
+    a = x[..., max(0, -dy):h - max(0, dy), max(0, -dx):w - max(0, dx)]
+    b = x[..., max(0, dy):h - max(0, -dy), max(0, dx):w - max(0, -dx)]
+    return a, b
+
+
+def halo(inp: torch.Tensor, out: torch.Tensor, tgt: torch.Tensor | None = None,
+         shifts=HALO_SHIFTS, sigma: float = 0.04) -> torch.Tensor:
+    """How much the edit treats alike-colored nearby pixels differently.
+
+    A halo is sky next to a tree graded unlike the same sky a little further
+    away; banding is a smooth gradient split into steps. Both make pixels of
+    nearly the same input color, a few pixels apart, come out different. For
+    pixel pairs at each (dy, dx) shift, weighted by input color similarity,
+    this measures |out_p - out_q| beyond |tgt_p - tgt_q| (what the target
+    itself does there is never penalized). (B, 3, H, W) in [0, 1] -> (B,).
+    The bilateral grid cell is 16 px at 256, so shifts span about one cell.
+    """
+    total = 0
+    for dy, dx in shifts:
+        (ia, ib), (oa, ob) = _pairs(inp, dy, dx), _pairs(out, dy, dx)
+        sim = torch.exp(-((ia - ib).abs().sum(1) / sigma) ** 2)
+        d = (oa - ob).abs().mean(1)
+        if tgt is not None:
+            ta, tb = _pairs(tgt, dy, dx)
+            d = F.relu(d - (ta - tb).abs().mean(1))
+        total = total + (sim * d).sum((1, 2)) / sim.sum((1, 2)).clamp_min(1)
+    return total / len(shifts)
+
+
+def random_shifts(n: int = 4, max_shift: int = 24, generator=None) -> list[tuple[int, int]]:
+    """n random (dy, dx) shifts of length 2..max_shift px for the halo loss."""
+    r = torch.randint(2, max_shift + 1, (n,), generator=generator).float()
+    a = torch.rand(n, generator=generator) * torch.pi
+    return [(int(round(float(ri * torch.sin(ai)))), int(round(float(ri * torch.cos(ai))))) for ri, ai in zip(r, a)]
+
+
 def _conv(cin: int, cout: int, stride: int = 1) -> list[nn.Module]:
     return [nn.Conv2d(cin, cout, 3, stride=stride, padding=1), nn.InstanceNorm2d(cout, affine=True),
             nn.LeakyReLU(0.2)]

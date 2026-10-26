@@ -1,0 +1,52 @@
+# GradeNet-L v5: no halos. v4 drew soft halos around dark objects against
+# the sky (the sky next to a tree graded unlike the same sky further away)
+# and bands in smooth skies: the grid switched LUTs by position within a
+# 16x16 cell instead of by the pixel's color. The halo loss
+# (grademl.local.halo) penalizes nearby pixels of alike input color coming
+# out more different than in the target. Same data as v4. Init from v4.
+# lambda_halo 3: halo -72%, PSNR = v4 (27.61). lambda 8 removed a bit more
+# (-84%) but cost 0.24 dB, with no visible difference on the test photos.
+name: grade_local_v5
+seed: 3
+arch: local
+
+model:
+  k: 4
+  n_luts: 32
+  lut_size: 33
+  width: 24
+  hidden: 640
+  bins3d: 8
+  grid_bins: 8
+
+data:
+  images: unsplash/images_384
+  maps: unsplash/scene_192
+  val_every_nth: 50
+  val_samples: 1500
+  extra:
+    - images: openimages/images_384
+      maps: openimages/scene_192
+      keep: openimages/quality.json
+      val_every_nth: 50
+      weight: 0.4
+  p_clean: 0.15
+  p_none: 0.25
+  p_local: 0.6
+  person_boost: 2.5
+  p_person_crop: 0.5
+  batch_size: 32
+  workers: 10
+
+train:
+  epochs: 8
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 300
+  lambda_smooth: 1.0e-4
+  lambda_mono: 1.0
+  lambda_grid: 1.0e-3
+  w_person: 3.0
+  w_skin: 2.0
+  lambda_halo: 3.0
+  eval_every: 2
